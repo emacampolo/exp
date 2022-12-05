@@ -3,7 +3,6 @@ package sftp_test
 import (
 	"bytes"
 	"context"
-	"net"
 	"testing"
 
 	"exp/sftp"
@@ -28,10 +27,8 @@ func TestNewClient(t *testing.T) {
 	reader := bytes.NewReader(input)
 
 	sshConfig := &ssh.ClientConfig{
-		User: "test",
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
+		User:            "test",
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Auth: []ssh.AuthMethod{
 			ssh.Password("test"),
 		},
