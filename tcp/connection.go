@@ -341,6 +341,12 @@ func (c *Connection) handleError(err error) {
 		return
 	}
 
+	// When the connection is closed, it is expected that either the read or write loop will return an error.
+	// In that case, we don't need to call the error handler.
+	if c.closing.Load() {
+		return
+	}
+
 	go c.errHandler(err)
 }
 
