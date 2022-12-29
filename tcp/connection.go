@@ -21,11 +21,11 @@ type IdleFunc func(connection *Connection)
 // The function is called in a separate goroutine.
 type ReadTimeoutFunc func(connection *Connection)
 
-// Handler is a function that is called when a message is received from the server and,
+// InboundMessageHandler is a function that is called when a message is received from the server and,
 // it is not a response to a request.
 // The function is called in a separate goroutine.
 // The function should return a response to be sent back to the server.
-type Handler func(connection *Connection, message Message)
+type InboundMessageHandler func(connection *Connection, message Message)
 
 var (
 	// ErrConnectionClosed is returned when the connection is closed.
@@ -71,7 +71,7 @@ type Connection struct {
 	encodeDecoder      EncodeDecoder
 	marshalUnmarshaler MarshalUnmarshaler
 	errHandler         ErrorHandler
-	handler            Handler
+	handler            InboundMessageHandler
 
 	mutex            sync.Mutex // guards pendingResponses map.
 	pendingResponses map[string]response
@@ -81,11 +81,11 @@ type Connection struct {
 	closing atomic.Bool
 }
 
-func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler Handler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
+func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
 	opts := defaultOptions()
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("applying option: %v", err)
 		}
 	}
 	return &Connection{
@@ -103,10 +103,10 @@ func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler Marsh
 	}, nil
 }
 
-func NewFrom(conn io.ReadWriteCloser, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler Handler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
+func NewFrom(conn io.ReadWriteCloser, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
 	c, err := New("", "", encDec, marshalUnmarshaler, handler, errHandler, options...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating connection: %w", err)
 	}
 	c.conn = conn
 	c.run()
@@ -136,7 +136,7 @@ func (c *Connection) run() {
 	go c.readResponseLoop()
 }
 
-// handlerConnectionError handles the connection error.
+// handlerConnectionError handles the connection error by closing the connection.
 func (c *Connection) handleConnectionError(err error) {
 	if err == nil || c.closing.Swap(true) {
 		return
@@ -150,6 +150,7 @@ func (c *Connection) handleConnectionError(err error) {
 	}
 	c.mutex.Unlock()
 
+	// Return the error to the callers of Send.
 	go func() {
 		for {
 			select {
@@ -185,6 +186,8 @@ func (c *Connection) close() error {
 	return nil
 }
 
+// Close closes the connection. It waits for all requests to complete before closing the connection.
+// It is safe to call Close multiple times.
 func (c *Connection) Close() error {
 	if c.closing.Swap(true) {
 		return nil
@@ -193,10 +196,12 @@ func (c *Connection) Close() error {
 	return c.close()
 }
 
+// Done returns a channel that is closed when the connection is closed.
 func (c *Connection) Done() <-chan struct{} {
 	return c.done
 }
 
+// request represents a request to the server.
 type request struct {
 	message   []byte
 	requestID string
@@ -216,7 +221,7 @@ func (c *Connection) Send(message Message) (Message, error) {
 	c.wg.Add(1)
 	defer c.wg.Done()
 
-	if c.closing.Swap(true) {
+	if c.closing.Load() {
 		return Message{}, ErrConnectionClosed
 	}
 
@@ -261,13 +266,38 @@ func (c *Connection) Send(message Message) (Message, error) {
 	return response, nil
 }
 
-// writeLoop read requests from the requestsCh and writes them to the connection.
-func (c *Connection) writeLoop() {
-	var timeoutCh <-chan time.Time
-	if c.options.idleTimeout != 0 {
-		timeoutCh = time.After(c.options.idleTimeout)
+// Reply sends message and does not wait for the response.
+// If the connection is closed, it returns ErrConnectionClosed.
+func (c *Connection) Reply(message Message) error {
+	c.wg.Add(1)
+	defer c.wg.Done()
+
+	if c.closing.Load() {
+		return ErrConnectionClosed
 	}
 
+	messageBytes, err := c.marshalUnmarshaler.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("marshaling message: %w", err)
+	}
+
+	var buff bytes.Buffer
+	if err := c.encodeDecoder.Encode(&buff, messageBytes); err != nil {
+		return err
+	}
+
+	req := request{
+		message: buff.Bytes(),
+		errCh:   make(chan error),
+	}
+
+	c.requestsCh <- req
+	err = <-req.errCh
+	return err
+}
+
+// writeLoop read requests from the requestsCh and writes them to the connection.
+func (c *Connection) writeLoop() {
 	var err error
 	for err == nil {
 		select {
@@ -294,7 +324,7 @@ func (c *Connection) writeLoop() {
 			if req.replyCh == nil {
 				req.errCh <- nil
 			}
-		case <-timeoutCh:
+		case <-c.options.idleTimeoutCh:
 			if c.options.idleFunc != nil {
 				go c.options.idleFunc(c)
 			}
@@ -333,16 +363,11 @@ func (c *Connection) readLoop() {
 }
 
 func (c *Connection) readResponseLoop() {
-	var timeoutCh <-chan time.Time
-	if c.options.readTimeout > 0 {
-		timeoutCh = time.After(c.options.readTimeout)
-	}
-
 	for {
 		select {
 		case mess := <-c.readResponseCh:
 			go c.handleResponse(mess)
-		case <-timeoutCh:
+		case <-c.options.readTimeoutCh:
 			if c.options.readTimeoutFunc != nil {
 				go c.options.readTimeoutFunc(c)
 			}

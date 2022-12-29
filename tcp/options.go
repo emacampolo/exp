@@ -6,9 +6,9 @@ import (
 )
 
 type options struct {
-	idleTimeout     time.Duration
+	idleTimeoutCh   <-chan time.Time
 	idleFunc        IdleFunc
-	readTimeout     time.Duration
+	readTimeoutCh   <-chan time.Time
 	readTimeoutFunc ReadTimeoutFunc
 	dialTimeout     time.Duration
 	sendTimeout     time.Duration
@@ -24,7 +24,7 @@ func WithIdleFunc(duration time.Duration, idleFunc IdleFunc) Option {
 		if duration == 0 && idleFunc != nil {
 			return fmt.Errorf("idle function is set but idle duration is 0")
 		}
-		o.idleTimeout = duration
+		o.idleTimeoutCh = time.After(duration)
 		o.idleFunc = idleFunc
 		return nil
 	}
@@ -38,7 +38,7 @@ func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc
 		if duration == 0 && readTimeoutFunc != nil {
 			return fmt.Errorf("read timeout function is set but read timeout duration is 0")
 		}
-		o.readTimeout = duration
+		o.readTimeoutCh = time.After(duration)
 		o.readTimeoutFunc = readTimeoutFunc
 		return nil
 	}
@@ -46,10 +46,11 @@ func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc
 
 func defaultOptions() options {
 	return options{
-		idleTimeout: 0,
-		idleFunc:    nil,
-		readTimeout: 0,
-		dialTimeout: 5 * time.Second,
-		sendTimeout: 30 * time.Second,
+		idleTimeoutCh:   nil,
+		idleFunc:        nil,
+		readTimeoutCh:   nil,
+		readTimeoutFunc: nil,
+		dialTimeout:     5 * time.Second,
+		sendTimeout:     30 * time.Second,
 	}
 }

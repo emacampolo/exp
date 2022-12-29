@@ -7,7 +7,6 @@ require (
 	github.com/stretchr/testify v1.8.0
 	github.com/testcontainers/testcontainers-go v0.14.0
 	golang.org/x/crypto v0.3.0
-	github.com/gofrs/uuid v4.3.0+incompatible
 )
 
 require (
