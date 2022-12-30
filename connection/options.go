@@ -6,12 +6,15 @@ import (
 )
 
 type options struct {
-	idleTimeoutCh   <-chan time.Time
-	idleFunc        IdleFunc
+	idleTimeoutCh <-chan time.Time
+	idleFunc      IdleFunc
+
 	readTimeoutCh   <-chan time.Time
 	readTimeoutFunc ReadTimeoutFunc
-	dialTimeout     time.Duration
-	sendTimeout     time.Duration
+
+	sendTimeoutCh <-chan time.Time
+
+	dialTimeout time.Duration
 }
 
 type Option func(*options) error
@@ -44,13 +47,29 @@ func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc
 	}
 }
 
+// WithSendTimeout sets a duration for which the connection will wait for a message to be sent.
+func WithSendTimeout(duration time.Duration) Option {
+	return func(o *options) error {
+		o.sendTimeoutCh = time.After(duration)
+		return nil
+	}
+}
+
+// WithDialTimeout sets a duration for which the dialer will wait for a connection to be established.
+func WithDialTimeout(duration time.Duration) Option {
+	return func(o *options) error {
+		o.dialTimeout = duration
+		return nil
+	}
+}
+
 func defaultOptions() options {
 	return options{
 		idleTimeoutCh:   nil,
 		idleFunc:        nil,
 		readTimeoutCh:   nil,
 		readTimeoutFunc: nil,
+		sendTimeoutCh:   nil,
 		dialTimeout:     5 * time.Second,
-		sendTimeout:     30 * time.Second,
 	}
 }

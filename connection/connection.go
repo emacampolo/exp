@@ -8,7 +8,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // IdleFunc is a function that is called when the connection is idle for a period of time.
@@ -196,6 +195,10 @@ func (c *Connection) Send(message Message) (Message, error) {
 		return Message{}, ErrConnectionClosed
 	}
 
+	if message.ID == "" {
+		return Message{}, errors.New("message ID is empty")
+	}
+
 	messageBytes, err := c.marshalUnmarshaler.Marshal(message)
 	if err != nil {
 		return Message{}, fmt.Errorf("marshaling message: %w", err)
@@ -215,18 +218,13 @@ func (c *Connection) Send(message Message) (Message, error) {
 
 	c.requestsCh <- req
 
-	var timeoutCh <-chan time.Time
-	if c.options.sendTimeout != 0 {
-		timeoutCh = time.After(c.options.sendTimeout)
-	}
-
 	var response Message
 
 	select {
 	case response = <-req.replyCh:
 	case err = <-req.errCh:
 		return Message{}, err
-	case <-timeoutCh:
+	case <-c.options.sendTimeoutCh:
 		return Message{}, ErrSendTimeout
 	}
 
