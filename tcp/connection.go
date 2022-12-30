@@ -125,9 +125,14 @@ func (c *Connection) Connect() error {
 	}
 
 	c.conn = conn
+	c.address = conn.RemoteAddr().String()
 	c.run()
 
 	return nil
+}
+
+func (c *Connection) Address() string {
+	return c.address
 }
 
 func (c *Connection) run() {
@@ -136,38 +141,14 @@ func (c *Connection) run() {
 	go c.readResponseLoop()
 }
 
-// handlerConnectionError handles the connection error by closing the connection.
-func (c *Connection) handleConnectionError(err error) {
-	if err == nil || c.closing.Swap(true) {
-		return
+// Close closes the connection. It waits for all requests to complete before closing the connection.
+// It is safe to call Close multiple times.
+func (c *Connection) Close() error {
+	if c.closing.Swap(true) {
+		return nil
 	}
 
-	done := make(chan struct{})
-
-	c.mutex.Lock()
-	for _, resp := range c.pendingResponses {
-		resp.errCh <- ErrConnectionClosed
-	}
-	c.mutex.Unlock()
-
-	// Return the error to the callers of Send.
-	go func() {
-		for {
-			select {
-			case req := <-c.requestsCh:
-				req.errCh <- ErrConnectionClosed
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	go func() {
-		c.wg.Wait()
-		done <- struct{}{}
-	}()
-
-	c.close()
+	return c.close()
 }
 
 func (c *Connection) close() error {
@@ -184,16 +165,6 @@ func (c *Connection) close() error {
 	}
 
 	return nil
-}
-
-// Close closes the connection. It waits for all requests to complete before closing the connection.
-// It is safe to call Close multiple times.
-func (c *Connection) Close() error {
-	if c.closing.Swap(true) {
-		return nil
-	}
-
-	return c.close()
 }
 
 // Done returns a channel that is closed when the connection is closed.
@@ -299,6 +270,7 @@ func (c *Connection) Reply(message Message) error {
 // writeLoop read requests from the requestsCh and writes them to the connection.
 func (c *Connection) writeLoop() {
 	var err error
+
 	for err == nil {
 		select {
 		case req := <-c.requestsCh:
@@ -348,6 +320,40 @@ func (c *Connection) handleError(err error) {
 	}
 
 	go c.errHandler(err)
+}
+
+// handlerConnectionError handles the connection error by closing the connection.
+func (c *Connection) handleConnectionError(err error) {
+	if err == nil || c.closing.Swap(true) {
+		return
+	}
+
+	done := make(chan struct{})
+
+	c.mutex.Lock()
+	for _, resp := range c.pendingResponses {
+		resp.errCh <- ErrConnectionClosed
+	}
+	c.mutex.Unlock()
+
+	// Return the error to the callers of Send.
+	go func() {
+		for {
+			select {
+			case req := <-c.requestsCh:
+				req.errCh <- ErrConnectionClosed
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		c.wg.Wait()
+		done <- struct{}{}
+	}()
+
+	c.close()
 }
 
 // readLoop reads data from the socket and runs a goroutine to handle the message.
