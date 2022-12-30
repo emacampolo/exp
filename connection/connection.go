@@ -1,4 +1,4 @@
-package tcp
+package connection
 
 import (
 	"bytes"
@@ -377,8 +377,8 @@ func (c *Connection) readLoop() {
 func (c *Connection) readResponseLoop() {
 	for {
 		select {
-		case mess := <-c.readResponseCh:
-			go c.handleResponse(mess)
+		case rawBytes := <-c.readResponseCh:
+			go c.handleResponse(rawBytes)
 		case <-c.options.readTimeoutCh:
 			if c.options.readTimeoutFunc != nil {
 				go c.options.readTimeoutFunc(c)

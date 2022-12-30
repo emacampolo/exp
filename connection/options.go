@@ -1,4 +1,4 @@
-package tcp
+package connection
 
 import (
 	"fmt"
