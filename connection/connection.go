@@ -58,12 +58,15 @@ type ErrorHandler func(err error)
 
 // Connection represents a connection to a server.
 type Connection struct {
-	network        string
-	address        string
-	conn           io.ReadWriteCloser
-	requestsCh     chan request
-	readResponseCh chan []byte
-	done           chan struct{}
+	network string
+	address string
+	conn    io.ReadWriteCloser
+	// outgoingChannel is used to send requests to the server.
+	outgoingChannel chan request
+	// incomingChannel is used to receive messages from the server.
+	incomingChannel chan []byte
+	// done is closed when the connection is closed and all messages are handled.
+	done chan struct{}
 
 	options options
 
@@ -75,7 +78,8 @@ type Connection struct {
 	mutex            sync.Mutex // guards pendingResponses map.
 	pendingResponses map[string]response
 
-	wg sync.WaitGroup
+	// messagesWg is used to wait for all the messages being sent and received to complete.
+	messagesWg sync.WaitGroup
 
 	closing atomic.Bool
 }
@@ -95,8 +99,8 @@ func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler Marsh
 		errHandler:         errHandler,
 		handler:            handler,
 		options:            opts,
-		requestsCh:         make(chan request),
-		readResponseCh:     make(chan []byte),
+		outgoingChannel:    make(chan request),
+		incomingChannel:    make(chan []byte),
 		done:               make(chan struct{}),
 		pendingResponses:   make(map[string]response),
 	}, nil
@@ -137,7 +141,7 @@ func (c *Connection) Address() string {
 func (c *Connection) run() {
 	go c.writeLoop()
 	go c.readLoop()
-	go c.readResponseLoop()
+	go c.handleLoop()
 }
 
 // Close closes the connection. It waits for all requests to complete before closing the connection.
@@ -151,10 +155,8 @@ func (c *Connection) Close() error {
 }
 
 func (c *Connection) close() error {
-	// wait for all requests to complete before closing the connection
-	c.wg.Wait()
-
-	close(c.done)
+	c.messagesWg.Wait()
+	defer close(c.done)
 
 	if c.conn != nil {
 		err := c.conn.Close()
@@ -188,8 +190,8 @@ type response struct {
 // If the response is not received within the timeout, it returns ErrSendTimeout.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Send(message Message) (Message, error) {
-	c.wg.Add(1)
-	defer c.wg.Done()
+	c.messagesWg.Add(1)
+	defer c.messagesWg.Done()
 
 	if c.closing.Load() {
 		return Message{}, ErrConnectionClosed
@@ -216,7 +218,7 @@ func (c *Connection) Send(message Message) (Message, error) {
 		errCh:     make(chan error),
 	}
 
-	c.requestsCh <- req
+	c.outgoingChannel <- req
 
 	var response Message
 
@@ -238,8 +240,8 @@ func (c *Connection) Send(message Message) (Message, error) {
 // Reply sends message and does not wait for the response.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Reply(message Message) error {
-	c.wg.Add(1)
-	defer c.wg.Done()
+	c.messagesWg.Add(1)
+	defer c.messagesWg.Done()
 
 	if c.closing.Load() {
 		return ErrConnectionClosed
@@ -260,18 +262,18 @@ func (c *Connection) Reply(message Message) error {
 		errCh:   make(chan error),
 	}
 
-	c.requestsCh <- req
+	c.outgoingChannel <- req
 	err = <-req.errCh
 	return err
 }
 
-// writeLoop read requests from the requestsCh and writes them to the connection.
+// writeLoop read requests from the outgoingChannel and writes them to the connection.
 func (c *Connection) writeLoop() {
 	var err error
 
 	for err == nil {
 		select {
-		case req := <-c.requestsCh:
+		case req := <-c.outgoingChannel:
 			if req.replyCh != nil {
 				c.mutex.Lock()
 				c.pendingResponses[req.requestID] = response{
@@ -334,11 +336,11 @@ func (c *Connection) handleConnectionError(err error) {
 	}
 	c.mutex.Unlock()
 
-	// Return the error to the callers of Send.
+	// Return the error to the callers of Send and Reply.
 	go func() {
 		for {
 			select {
-			case req := <-c.requestsCh:
+			case req := <-c.outgoingChannel:
 				req.errCh <- ErrConnectionClosed
 			case <-done:
 				return
@@ -347,7 +349,7 @@ func (c *Connection) handleConnectionError(err error) {
 	}()
 
 	go func() {
-		c.wg.Wait()
+		c.messagesWg.Wait()
 		done <- struct{}{}
 	}()
 
@@ -355,6 +357,8 @@ func (c *Connection) handleConnectionError(err error) {
 }
 
 // readLoop reads data from the socket and runs a goroutine to handle the message.
+// It reads data from the socket until the connection is closed.
+// We should not return from Close until all the messages are handled.
 func (c *Connection) readLoop() {
 	var err error
 	var messageBytes []byte
@@ -366,16 +370,19 @@ func (c *Connection) readLoop() {
 			break
 		}
 
-		c.readResponseCh <- messageBytes
+		c.incomingChannel <- messageBytes
 	}
 
 	c.handleConnectionError(err)
 }
 
-func (c *Connection) readResponseLoop() {
+// handleLoop handles the incoming messages that are read from the socket by the readLoop.
+// The messages may correspond to the responses to the requests sent by the Send method
+// or, they may be messages sent by the server to the client without a request.
+func (c *Connection) handleLoop() {
 	for {
 		select {
-		case rawBytes := <-c.readResponseCh:
+		case rawBytes := <-c.incomingChannel:
 			go c.handleResponse(rawBytes)
 		case <-c.options.readTimeoutCh:
 			if c.options.readTimeoutFunc != nil {
