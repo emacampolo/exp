@@ -408,6 +408,8 @@ func (c *Connection) handleResponse(rawBytes []byte) {
 	if found {
 		response.replyCh <- message
 	} else {
+		c.messagesWg.Add(1)
 		c.handler(c, message)
+		c.messagesWg.Done()
 	}
 }

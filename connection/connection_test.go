@@ -4,10 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,8 +22,7 @@ import (
 )
 
 type testServer struct {
-	Addr string
-
+	Addr   string
 	Server *testserver.TestServer
 }
 
@@ -25,46 +30,86 @@ func (t *testServer) Shutdown() {
 	t.Server.Shutdown()
 }
 
+func (t *testServer) Handler() testserver.Handler {
+	return func(ctx context.Context, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		for {
+			id, payload := read(reader)
+			if payload == "" {
+				return
+			}
+
+			switch payload {
+			case "ping":
+				log.Println("server: received ping, sending pong")
+				conn.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
+			case "sign_on":
+				log.Println("server: received sign_on, sending ack")
+				conn.Write([]byte(fmt.Sprintf("%s,signed_on\n", id)))
+
+				for i := 0; i < 1000; i++ {
+					randomString := make([]byte, 10)
+					rand.Read(randomString)
+					// ID starts from 100 to avoid collision with other messages.
+					_, err := conn.Write([]byte(fmt.Sprintf("%d,%s\n", i+100, hex.EncodeToString(randomString))))
+					if err != nil {
+						log.Println("server: error writing message:", err)
+						return
+					}
+				}
+				log.Println("server: finished writing messages")
+			case "sign_off":
+				conn.Write([]byte(fmt.Sprintf("%s,signed_off\n", id)))
+				log.Println("server: sign-off sent")
+				// Wait for the client to decode the ack before closing the connection since
+				// the read loop is still running and will try to read from the connection and
+				// will get an EOF error before the client has a chance to decode the ack.
+				time.Sleep(100 * time.Millisecond)
+				return
+			default:
+				log.Println("server: received unknown message:", payload)
+				return
+			}
+		}
+	}
+}
+
 func newTestServerWithAddr(addr string) (*testServer, error) {
-	var testSrv *testServer
+	testSrv := &testServer{}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	srv := testserver.New(ln, func(ctx context.Context, conn net.Conn) {
-		for {
-			message, err := bufio.NewReader(conn).ReadString('\n')
-			if err != nil {
-				fmt.Printf("error reading message: %v", err)
-				return
-			}
-
-			// Strip the newline.
-			message = strings.TrimSpace(message)
-
-			id, payload, found := strings.Cut(message, ",")
-			if !found {
-				fmt.Printf("error parsing message: %v", err)
-				return
-			}
-
-			if payload == "ping" {
-				conn.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
-			} else {
-				conn.Write([]byte("unknown\n"))
-			}
-		}
-	})
+	srv := testserver.New(ln, testSrv.Handler())
+	testSrv.Server = srv
+	testSrv.Addr = ln.Addr().String()
 
 	go srv.Listen()
 
-	testSrv = &testServer{
-		Server: srv,
-		Addr:   ln.Addr().String(),
+	return testSrv, nil
+}
+
+func read(reader *bufio.Reader) (string, string) {
+	message, err := reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			log.Println("server: read EOF, closing connection")
+			return "", ""
+		}
+		log.Printf("server: error reading message: %v", err)
+		return "", ""
 	}
 
-	return testSrv, nil
+	// Strip the newline.
+	message = strings.TrimSpace(message)
+
+	id, payload, found := strings.Cut(message, ",")
+	if !found {
+		log.Printf("server: error parsing message: %q", message)
+		return "", ""
+	}
+	return id, payload
 }
 
 func newTestServer() (*testServer, error) {
@@ -72,16 +117,23 @@ func newTestServer() (*testServer, error) {
 }
 
 // encodeDecoder implements a connection.EncodeDecoder that uses a new line as a delimiter for messages.
-type encodeDecoder struct{}
+type encodeDecoder struct {
+	buff *bufio.Reader
+	once sync.Once
+}
 
-func (encodeDecoder) Encode(writer io.Writer, message []byte) error {
+func (ed *encodeDecoder) Encode(writer io.Writer, message []byte) error {
 	writer.Write(message)
 	writer.Write([]byte("\n"))
 	return nil
 }
 
-func (encodeDecoder) Decode(reader io.Reader) ([]byte, error) {
-	b, err := bufio.NewReader(reader).ReadBytes('\n')
+func (ed *encodeDecoder) Decode(reader io.Reader) (b []byte, err error) {
+	ed.once.Do(func() {
+		ed.buff = bufio.NewReader(reader)
+	})
+
+	b, err = ed.buff.ReadBytes('\n')
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +152,7 @@ func (marshalUnmarshal) Marshal(message connection.Message) ([]byte, error) {
 func (marshalUnmarshal) Unmarshal(data []byte) (connection.Message, error) {
 	id, payload, found := bytes.Cut(data, []byte(","))
 	if !found {
-		return connection.Message{}, fmt.Errorf("error parsing message: could not find comma: %q", data)
+		return connection.Message{}, fmt.Errorf("error unmarshaling message: could not find comma: %q", data)
 	}
 
 	return connection.Message{ID: string(id), Payload: string(payload)}, nil
@@ -122,7 +174,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
 
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
@@ -137,7 +189,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 	})
 	t.Run("connect times out", func(t *testing.T) {
-		c, err := connection.New("tcp", "10.0.0.0:50000", encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
+		c, err := connection.New("tcp", "10.0.0.0:50000", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -162,7 +214,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 	})
 	t.Run("no panic when Close before Connect", func(t *testing.T) {
-		c, err := connection.New("tcp", "", encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
+		c, err := connection.New("tcp", "", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -180,14 +232,14 @@ func TestClient_Send(t *testing.T) {
 	}
 	defer server.Shutdown()
 
-	t.Run("sends messages to server and receives responses", func(t *testing.T) {
+	t.Run("send messages to server and receives responses", func(t *testing.T) {
 		server, err := newTestServer()
 		if err != nil {
 			t.Fatalf("error creating test server: %v", err)
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -207,6 +259,63 @@ func TestClient_Send(t *testing.T) {
 
 		if err := c.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
+		}
+	})
+
+	t.Run("send sign on message to server and wait for all messages to be handled", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		var count atomic.Int64
+		handler := func(connection *connection.Connection, message connection.Message) {
+			// Simulate a long running task.
+			count.Add(1)
+			time.Sleep(1 * time.Second)
+		}
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, handler, func(err error) {
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		result, err := c.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		if err != nil {
+			t.Fatalf("error sending message: %v", err)
+		}
+
+		if result.Payload.(string) != "signed_on" {
+			t.Fatalf("result: %v, expected signed_on", result)
+		}
+
+		log.Println("waiting for all messages to be handled")
+		time.Sleep(1 * time.Second)
+
+		result, err = c.Send(connection.Message{ID: "1", Payload: "sign_off"})
+		if err != nil {
+			t.Fatalf("error sending message: %v", err)
+		}
+
+		if result.Payload.(string) != "signed_off" {
+			t.Fatalf("result: %v, expected signed_off", result)
+		}
+
+		if err := c.Close(); err != nil {
+			t.Fatalf("error closing connection: %v", err)
+		}
+
+		if count.Load() != 1000 {
+			t.Fatalf("expected 1000 messages to be handled, got %v", count.Load())
 		}
 	})
 }
