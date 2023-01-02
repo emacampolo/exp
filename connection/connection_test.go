@@ -261,7 +261,6 @@ func TestClient_Send(t *testing.T) {
 			t.Fatalf("error closing connection: %v", err)
 		}
 	})
-
 	t.Run("send sign on message to server and wait for all messages to be handled", func(t *testing.T) {
 		server, err := newTestServer()
 		if err != nil {

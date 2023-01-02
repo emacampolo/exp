@@ -6,8 +6,8 @@ import (
 )
 
 type options struct {
-	idleTimeoutCh <-chan time.Time
-	idleFunc      IdleFunc
+	writeTimeoutCh   <-chan time.Time
+	writeTimeoutFunc WriteTimeoutFunc
 
 	readTimeoutCh   <-chan time.Time
 	readTimeoutFunc ReadTimeoutFunc
@@ -19,16 +19,16 @@ type options struct {
 
 type Option func(*options) error
 
-// WithIdleFunc sets a duration after which the connection is considered idle
+// WithWriteTimeoutFunc sets a duration after which the connection is considered idle
 // and the idle function is called.
 // If duration is 0, the connection will never be considered idle.
-func WithIdleFunc(duration time.Duration, idleFunc IdleFunc) Option {
+func WithWriteTimeoutFunc(duration time.Duration, writeTimeoutFunc WriteTimeoutFunc) Option {
 	return func(o *options) error {
-		if duration == 0 && idleFunc != nil {
-			return fmt.Errorf("idle function is set but idle duration is 0")
+		if duration == 0 && writeTimeoutFunc != nil {
+			return fmt.Errorf("write timeout is set but write timeout duration is 0")
 		}
-		o.idleTimeoutCh = time.After(duration)
-		o.idleFunc = idleFunc
+		o.writeTimeoutCh = time.After(duration)
+		o.writeTimeoutFunc = writeTimeoutFunc
 		return nil
 	}
 }
@@ -65,11 +65,11 @@ func WithDialTimeout(duration time.Duration) Option {
 
 func defaultOptions() options {
 	return options{
-		idleTimeoutCh:   nil,
-		idleFunc:        nil,
-		readTimeoutCh:   nil,
-		readTimeoutFunc: nil,
-		sendTimeoutCh:   nil,
-		dialTimeout:     5 * time.Second,
+		writeTimeoutCh:   nil,
+		writeTimeoutFunc: nil,
+		readTimeoutCh:    nil,
+		readTimeoutFunc:  nil,
+		sendTimeoutCh:    nil,
+		dialTimeout:      5 * time.Second,
 	}
 }

@@ -10,18 +10,18 @@ import (
 	"sync/atomic"
 )
 
-// IdleFunc is a function that is called when the connection is idle for a period of time.
+// WriteTimeoutFunc is a function that is called when the connection is idle trying to write to the connection.
 // A common use case is to send a heartbeat message to the server.
 // The function is called in a separate goroutine.
-type IdleFunc func(connection *Connection)
+type WriteTimeoutFunc func(connection *Connection)
 
-// ReadTimeoutFunc is a function that is called when the connection is idle waiting for a
-// message from the server for a period of time.
+// ReadTimeoutFunc is a function that is called when the connection is idle waiting for a message from the server
+// for a period of time.
 // The function is called in a separate goroutine.
 type ReadTimeoutFunc func(connection *Connection)
 
-// InboundMessageHandler is a function that is called when a message is received from the server and,
-// it is not a response to a request.
+// InboundMessageHandler is a function that is called when a message is received from the server
+// and is not a response to a request sent using Send.
 // The function is called in a separate goroutine.
 // The function should return a response to be sent back to the server.
 type InboundMessageHandler func(connection *Connection, message Message)
@@ -39,7 +39,8 @@ type EncodeDecoder interface {
 	Decode(reader io.Reader) ([]byte, error)
 }
 
-// Message is a message that is sent or received from the server.
+// Message represents a message sent to or received from the server.
+// The Payload is any data that is marshaled and unmarshalled by the MarshalUnmarshaler.
 type Message struct {
 	// ID is the identification of the message that is used to match the response to the request.
 	ID string
@@ -47,13 +48,13 @@ type Message struct {
 	Payload any
 }
 
-// MarshalUnmarshaler is responsible for marshaling and un-marshaling the messages.
+// MarshalUnmarshaler is responsible for marshaling and unmarshalling the messages.
 type MarshalUnmarshaler interface {
 	Marshal(Message) ([]byte, error)
 	Unmarshal([]byte) (Message, error)
 }
 
-// ErrorHandler is called in a goroutine with the errors that can't be returned to the caller
+// ErrorHandler is called in a goroutine with the errors that can't be returned to the caller.
 type ErrorHandler func(err error)
 
 // Connection represents a connection to a server.
@@ -61,6 +62,7 @@ type Connection struct {
 	network string
 	address string
 	conn    io.ReadWriteCloser
+
 	// outgoingChannel is used to send requests to the server.
 	outgoingChannel chan request
 	// incomingChannel is used to receive messages from the server.
@@ -84,7 +86,9 @@ type Connection struct {
 	closing atomic.Bool
 }
 
-func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
+// New creates a new connection to the server.
+// All the argument but the options are required.
+func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
 	opts := defaultOptions()
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
@@ -94,20 +98,23 @@ func New(network, address string, encDec EncodeDecoder, marshalUnmarshaler Marsh
 	return &Connection{
 		network:            network,
 		address:            address,
-		encodeDecoder:      encDec,
+		encodeDecoder:      encodeDecoder,
 		marshalUnmarshaler: marshalUnmarshaler,
-		errHandler:         errHandler,
 		handler:            handler,
-		options:            opts,
-		outgoingChannel:    make(chan request),
-		incomingChannel:    make(chan []byte),
-		done:               make(chan struct{}),
-		pendingResponses:   make(map[string]response),
+		errHandler:         errHandler,
+
+		options:          opts,
+		outgoingChannel:  make(chan request),
+		incomingChannel:  make(chan []byte),
+		done:             make(chan struct{}),
+		pendingResponses: make(map[string]response),
 	}, nil
 }
 
-func NewFrom(conn io.ReadWriteCloser, encDec EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
-	c, err := New("", "", encDec, marshalUnmarshaler, handler, errHandler, options...)
+// NewFrom creates a new connection from an existing connection.
+// All the argument but the options are required.
+func NewFrom(conn io.ReadWriteCloser, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
+	c, err := New("", "", encodeDecoder, marshalUnmarshaler, handler, errHandler, options...)
 	if err != nil {
 		return nil, fmt.Errorf("creating connection: %w", err)
 	}
@@ -116,6 +123,7 @@ func NewFrom(conn io.ReadWriteCloser, encDec EncodeDecoder, marshalUnmarshaler M
 	return c, nil
 }
 
+// Connect connects to the server.
 func (c *Connection) Connect() error {
 	if c.conn != nil {
 		c.run()
@@ -134,6 +142,8 @@ func (c *Connection) Connect() error {
 	return nil
 }
 
+// Address returns the address of the server that the connection is connected to.
+// If the connection is not connected, it returns an empty string.
 func (c *Connection) Address() string {
 	return c.address
 }
@@ -181,6 +191,7 @@ type request struct {
 	errCh     chan error
 }
 
+// response represents a response from the server.
 type response struct {
 	replyCh chan Message
 	errCh   chan error
@@ -296,9 +307,9 @@ func (c *Connection) writeLoop() {
 			if req.replyCh == nil {
 				req.errCh <- nil
 			}
-		case <-c.options.idleTimeoutCh:
-			if c.options.idleFunc != nil {
-				go c.options.idleFunc(c)
+		case <-c.options.writeTimeoutCh:
+			if c.options.writeTimeoutFunc != nil {
+				go c.options.writeTimeoutFunc(c)
 			}
 		case <-c.done:
 			return
@@ -322,7 +333,8 @@ func (c *Connection) handleError(err error) {
 	go c.errHandler(err)
 }
 
-// handlerConnectionError handles the connection error by closing the connection.
+// handlerConnectionError is called when we get an error when reading or writing to the connection.
+// It closes the connection.
 func (c *Connection) handleConnectionError(err error) {
 	if err == nil || c.closing.Swap(true) {
 		return
