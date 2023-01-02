@@ -66,6 +66,10 @@ func (t *testServer) Handler() testserver.Handler {
 				// will get an EOF error before the client has a chance to decode the ack.
 				time.Sleep(100 * time.Millisecond)
 				return
+			case "delay":
+				log.Println("server: received delay")
+				time.Sleep(200 * time.Millisecond)
+				conn.Write([]byte(fmt.Sprintf("%s,ack\n", id)))
 			default:
 				log.Println("server: received unknown message:", payload)
 				return
@@ -226,12 +230,6 @@ func TestClient_Connect(t *testing.T) {
 }
 
 func TestClient_Send(t *testing.T) {
-	server, err := newTestServer()
-	if err != nil {
-		t.Fatalf("error creating test server: %v", err)
-	}
-	defer server.Shutdown()
-
 	t.Run("send messages to server and receives responses", func(t *testing.T) {
 		server, err := newTestServer()
 		if err != nil {
@@ -315,6 +313,62 @@ func TestClient_Send(t *testing.T) {
 
 		if count.Load() != 1000 {
 			t.Fatalf("expected 1000 messages to be handled, got %v", count.Load())
+		}
+	})
+	t.Run("return ErrConnectionClosed when Close was called", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		if err := c.Close(); err != nil {
+			t.Fatalf("error closing connection: %v", err)
+		}
+
+		_, err = c.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		if !errors.Is(err, connection.ErrConnectionClosed) {
+			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+		}
+	})
+	t.Run("return ErrSendTimeout when response was not received during SendTimeout time", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}, connection.WithSendTimeout(100*time.Millisecond))
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		defer c.Close()
+
+		_, err = c.Send(connection.Message{ID: "1", Payload: "delay"})
+		if !errors.Is(err, connection.ErrSendTimeout) {
+			t.Fatalf("expected ErrSendTimeout, got %v", err)
 		}
 	})
 }
