@@ -6,9 +6,8 @@ import (
 	"net"
 	"testing"
 
-	"exp/sftp"
-	"exp/sftp/sftptest"
-
+	"github.com/emacampolo/exp/sftp"
+	"github.com/emacampolo/exp/sftp/sftptest"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )

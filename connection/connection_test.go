@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"exp/connection"
-	"exp/connection/testserver"
+	"github.com/emacampolo/exp/connection"
+	"github.com/emacampolo/exp/connection/testserver"
 )
 
 type testServer struct {
