@@ -417,7 +417,7 @@ func TestClient_Send(t *testing.T) {
 		var errs []error
 		var mu sync.Mutex
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 100; i++ {
 			wg.Add(1)
 			go func(i int) {
 				defer func() {
@@ -435,15 +435,19 @@ func TestClient_Send(t *testing.T) {
 
 				if result.Payload.(string) != "ack" {
 					mu.Lock()
-					errs = append(errs, fmt.Errorf("resylt: %v, expected \"ack\"", result))
+					errs = append(errs, fmt.Errorf("result: %v, expected \"ack\"", result))
 					mu.Unlock()
 					return
 				}
 			}(i)
 		}
 
-		// let's wait all messages to be sent
-		time.Sleep(10 * time.Millisecond)
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+
+		// Let's wait all messages to be sent
+		time.Sleep(100 * time.Millisecond)
 		if err := c.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}

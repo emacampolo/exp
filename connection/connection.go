@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 )
 
 // WriteTimeoutFunc is a function that is called when the connection is idle trying to write to the connection.
@@ -80,11 +79,9 @@ type Connection struct {
 	pendingResponsesMutex sync.Mutex // guards pendingResponses map.
 	pendingResponses      map[string]response
 
-	messageWgMutex sync.Mutex // guards messageWg.
-	// messagesWg is used to wait for all the messages being sent and received to complete.
+	mutex      sync.Mutex // guards messagesWg and closing.
 	messagesWg sync.WaitGroup
-
-	closing atomic.Bool
+	closing    bool
 }
 
 // New creates a new connection to the server.
@@ -158,19 +155,22 @@ func (c *Connection) run() {
 // Close closes the connection. It waits for all requests to complete before closing the connection.
 // It is safe to call Close multiple times.
 func (c *Connection) Close() error {
-	if c.closing.Swap(true) {
+	c.mutex.Lock()
+
+	if c.closing {
+		c.mutex.Unlock()
 		return nil
 	}
+	c.closing = true
+	c.mutex.Unlock()
 
 	return c.close()
 }
 
 func (c *Connection) close() error {
-	c.messageWgMutex.Lock()
 	c.messagesWg.Wait()
-	c.messageWgMutex.Unlock()
 
-	defer close(c.done)
+	close(c.done)
 
 	if c.conn != nil {
 		err := c.conn.Close()
@@ -205,14 +205,16 @@ type response struct {
 // If the response is not received within the timeout, it returns ErrSendTimeout.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Send(message Message) (Message, error) {
-	c.messageWgMutex.Lock()
-	c.messagesWg.Add(1)
-	c.messageWgMutex.Unlock()
-	defer c.messagesWg.Done()
-
-	if c.closing.Load() {
+	c.mutex.Lock()
+	if c.closing {
+		c.mutex.Unlock()
 		return Message{}, ErrConnectionClosed
 	}
+
+	c.messagesWg.Add(1)
+	c.mutex.Unlock()
+
+	defer c.messagesWg.Done()
 
 	if message.ID == "" {
 		return Message{}, errors.New("message ID is empty")
@@ -257,14 +259,16 @@ func (c *Connection) Send(message Message) (Message, error) {
 // Reply sends message and does not wait for the response.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Reply(message Message) error {
-	c.messageWgMutex.Lock()
-	c.messagesWg.Add(1)
-	c.messageWgMutex.Unlock()
-	defer c.messagesWg.Done()
-
-	if c.closing.Load() {
+	c.mutex.Lock()
+	if c.closing {
+		c.mutex.Unlock()
 		return ErrConnectionClosed
 	}
+
+	c.messagesWg.Add(1)
+	c.mutex.Unlock()
+
+	defer c.messagesWg.Done()
 
 	messageBytes, err := c.marshalUnmarshaler.Marshal(message)
 	if err != nil {
@@ -334,9 +338,12 @@ func (c *Connection) handleError(err error) {
 
 	// When the connection is closed, it is expected that either the read or write loop will return an error.
 	// In that case, we don't need to call the error handler.
-	if c.closing.Load() {
+	c.mutex.Lock()
+	if c.closing {
+		c.mutex.Unlock()
 		return
 	}
+	c.mutex.Unlock()
 
 	go c.errHandler(err)
 }
@@ -344,9 +351,14 @@ func (c *Connection) handleError(err error) {
 // handlerConnectionError is called when we get an error when reading or writing to the connection.
 // It closes the connection.
 func (c *Connection) handleConnectionError(err error) {
-	if err == nil || c.closing.Swap(true) {
+	c.mutex.Lock()
+	if err == nil || c.closing {
+		c.mutex.Unlock()
 		return
 	}
+
+	c.closing = true
+	c.mutex.Unlock()
 
 	done := make(chan struct{})
 
@@ -428,13 +440,14 @@ func (c *Connection) handleResponse(rawBytes []byte) {
 	if found {
 		response.replyCh <- message
 	} else {
-		c.messageWgMutex.Lock()
-		c.messagesWg.Add(1)
-		c.messageWgMutex.Unlock()
-
-		if c.closing.Load() {
+		c.mutex.Lock()
+		if c.closing {
+			c.mutex.Unlock()
 			return
 		}
+
+		c.messagesWg.Add(1)
+		c.mutex.Unlock()
 
 		c.handler(c, message)
 		c.messagesWg.Done()
