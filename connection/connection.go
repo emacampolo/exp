@@ -432,6 +432,10 @@ func (c *Connection) handleResponse(rawBytes []byte) {
 		c.messagesWg.Add(1)
 		c.messageWgMutex.Unlock()
 
+		if c.closing.Load() {
+			return
+		}
+
 		c.handler(c, message)
 		c.messagesWg.Done()
 	}
