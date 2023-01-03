@@ -16,6 +16,9 @@ import (
 var alphabet = []byte("abcdefghijklmnopqrstuvwxyz")
 
 func TestNewClient(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	// Given
 	ctx := context.Background()
 	container, err := sftptest.NewContainer(ctx)
