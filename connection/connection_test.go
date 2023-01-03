@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,6 @@ func (t *testServer) Handler() testserver.Handler {
 
 			switch payload {
 			case "ping":
-				log.Println("server: received ping, sending pong")
 				conn.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
 			case "sign_on":
 				log.Println("server: received sign_on, sending ack")
@@ -98,7 +98,6 @@ func read(reader *bufio.Reader) (string, string) {
 	message, err := reader.ReadString('\n')
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			log.Println("server: read EOF, closing connection")
 			return "", ""
 		}
 		log.Printf("server: error reading message: %v", err)
@@ -450,4 +449,75 @@ func TestClient_Send(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+func BenchmarkSend100(b *testing.B) { benchmarkSend(100, b) }
+
+func BenchmarkSend1000(b *testing.B) { benchmarkSend(1000, b) }
+
+func BenchmarkSend10000(b *testing.B) { benchmarkSend(10000, b) }
+
+func BenchmarkSend100000(b *testing.B) { benchmarkSend(100000, b) }
+
+func benchmarkSend(m int, b *testing.B) {
+	server, err := newTestServer()
+	if err != nil {
+		b.Fatalf("error creating test server: %v", err)
+	}
+	defer server.Shutdown()
+
+	c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+		if !errors.Is(err, io.EOF) {
+			b.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	if err != nil {
+		b.Fatalf("error creating connection: %v", err)
+	}
+
+	err = c.Connect()
+	if err != nil {
+		b.Fatal("connecting to the server: ", err)
+	}
+
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		processMessages(b, m, c)
+	}
+
+	err = c.Close()
+	if err != nil {
+		b.Fatal("closing client: ", err)
+	}
+}
+
+// send/receive m messages
+func processMessages(b *testing.B, m int, c *connection.Connection) {
+	var wg sync.WaitGroup
+	var gerr error
+
+	for i := 0; i < m; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			result, err := c.Send(connection.Message{ID: strconv.Itoa(i), Payload: "ping"})
+			if err != nil {
+				gerr = err
+				return
+			}
+
+			if result.Payload.(string) != "pong" {
+				gerr = err
+				return
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	if gerr != nil {
+		b.Fatal("sending message: ", gerr)
+	}
 }
