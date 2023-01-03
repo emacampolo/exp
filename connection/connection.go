@@ -77,9 +77,10 @@ type Connection struct {
 	errHandler         ErrorHandler
 	handler            InboundMessageHandler
 
-	mutex            sync.Mutex // guards pendingResponses map.
-	pendingResponses map[string]response
+	pendingResponsesMutex sync.Mutex // guards pendingResponses map.
+	pendingResponses      map[string]response
 
+	messageWgMutex sync.Mutex // guards messageWg.
 	// messagesWg is used to wait for all the messages being sent and received to complete.
 	messagesWg sync.WaitGroup
 
@@ -165,7 +166,10 @@ func (c *Connection) Close() error {
 }
 
 func (c *Connection) close() error {
+	c.messageWgMutex.Lock()
 	c.messagesWg.Wait()
+	c.messageWgMutex.Unlock()
+
 	defer close(c.done)
 
 	if c.conn != nil {
@@ -201,7 +205,9 @@ type response struct {
 // If the response is not received within the timeout, it returns ErrSendTimeout.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Send(message Message) (Message, error) {
+	c.messageWgMutex.Lock()
 	c.messagesWg.Add(1)
+	c.messageWgMutex.Unlock()
 	defer c.messagesWg.Done()
 
 	if c.closing.Load() {
@@ -241,9 +247,9 @@ func (c *Connection) Send(message Message) (Message, error) {
 		return Message{}, ErrSendTimeout
 	}
 
-	c.mutex.Lock()
+	c.pendingResponsesMutex.Lock()
 	delete(c.pendingResponses, req.requestID)
-	c.mutex.Unlock()
+	c.pendingResponsesMutex.Unlock()
 
 	return response, nil
 }
@@ -251,7 +257,9 @@ func (c *Connection) Send(message Message) (Message, error) {
 // Reply sends message and does not wait for the response.
 // If the connection is closed, it returns ErrConnectionClosed.
 func (c *Connection) Reply(message Message) error {
+	c.messageWgMutex.Lock()
 	c.messagesWg.Add(1)
+	c.messageWgMutex.Unlock()
 	defer c.messagesWg.Done()
 
 	if c.closing.Load() {
@@ -286,12 +294,12 @@ func (c *Connection) writeLoop() {
 		select {
 		case req := <-c.outgoingChannel:
 			if req.replyCh != nil {
-				c.mutex.Lock()
+				c.pendingResponsesMutex.Lock()
 				c.pendingResponses[req.requestID] = response{
 					replyCh: req.replyCh,
 					errCh:   req.errCh,
 				}
-				c.mutex.Unlock()
+				c.pendingResponsesMutex.Unlock()
 			}
 
 			_, err = c.conn.Write(req.message)
@@ -342,11 +350,11 @@ func (c *Connection) handleConnectionError(err error) {
 
 	done := make(chan struct{})
 
-	c.mutex.Lock()
+	c.pendingResponsesMutex.Lock()
 	for _, resp := range c.pendingResponses {
 		resp.errCh <- ErrConnectionClosed
 	}
-	c.mutex.Unlock()
+	c.pendingResponsesMutex.Unlock()
 
 	// Return the error to the callers of Send and Reply.
 	go func() {
@@ -413,14 +421,17 @@ func (c *Connection) handleResponse(rawBytes []byte) {
 		return
 	}
 
-	c.mutex.Lock()
+	c.pendingResponsesMutex.Lock()
 	response, found := c.pendingResponses[message.ID]
-	c.mutex.Unlock()
+	c.pendingResponsesMutex.Unlock()
 
 	if found {
 		response.replyCh <- message
 	} else {
+		c.messageWgMutex.Lock()
 		c.messagesWg.Add(1)
+		c.messageWgMutex.Unlock()
+
 		c.handler(c, message)
 		c.messagesWg.Done()
 	}

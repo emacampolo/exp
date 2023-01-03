@@ -371,4 +371,83 @@ func TestClient_Send(t *testing.T) {
 			t.Fatalf("expected ErrSendTimeout, got %v", err)
 		}
 	})
+	t.Run("return error when the Message does not have an ID", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}, connection.WithSendTimeout(100*time.Millisecond))
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		defer c.Close()
+
+		_, err = c.Send(connection.Message{Payload: "delay"})
+		if err == nil || err.Error() != "message ID is empty" {
+			t.Fatalf("expected error with \"message ID is empty\", got %q", err.Error())
+		}
+	})
+	t.Run("pending requests should complete after Close was called", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		var errs []error
+		var mu sync.Mutex
+
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer func() {
+					wg.Done()
+				}()
+
+				id := fmt.Sprintf("%v", i+1)
+				result, err := c.Send(connection.Message{ID: id, Payload: "delay"})
+				if err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("error sending message: %v", err))
+					mu.Unlock()
+					return
+				}
+
+				if result.Payload.(string) != "ack" {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("resylt: %v, expected \"ack\"", result))
+					mu.Unlock()
+					return
+				}
+			}(i)
+		}
+
+		// let's wait all messages to be sent
+		time.Sleep(10 * time.Millisecond)
+		if err := c.Close(); err != nil {
+			t.Fatalf("error closing connection: %v", err)
+		}
+		wg.Wait()
+	})
 }

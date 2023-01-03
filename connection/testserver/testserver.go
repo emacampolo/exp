@@ -14,7 +14,7 @@ type Handler func(ctx context.Context, conn net.Conn)
 type TestServer struct {
 	handler Handler
 
-	mu sync.Mutex // guards wg.
+	mu sync.Mutex
 	wg sync.WaitGroup
 
 	l         net.Listener
@@ -42,24 +42,25 @@ func (s *TestServer) Listen() {
 			return
 		}
 
+		s.mu.Lock()
 		s.wg.Add(1)
+		s.mu.Unlock()
 		go func(c net.Conn) {
-			defer c.Close()
-			defer s.wg.Done()
-
 			s.handler(s.ctx, c)
+			c.Close()
+			s.wg.Done()
 		}(conn)
 	}
 }
 
 func (s *TestServer) Shutdown() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.l.Close()
 
 	// Canceling context.
 	s.ctxCancel()
 
 	// Wait for active connections to close.
+	s.mu.Lock()
 	s.wg.Wait()
+	s.mu.Unlock()
 }
