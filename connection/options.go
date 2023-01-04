@@ -27,7 +27,7 @@ func WithWriteTimeoutFunc(duration time.Duration, writeTimeoutFunc WriteTimeoutF
 		if duration == 0 && writeTimeoutFunc != nil {
 			return fmt.Errorf("write timeout is set but write timeout duration is 0")
 		}
-		o.writeTimeoutCh = time.After(duration)
+		o.writeTimeoutCh = time.Tick(duration)
 		o.writeTimeoutFunc = writeTimeoutFunc
 		return nil
 	}
@@ -41,7 +41,7 @@ func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc
 		if duration == 0 && readTimeoutFunc != nil {
 			return fmt.Errorf("read timeout function is set but read timeout duration is 0")
 		}
-		o.readTimeoutCh = time.After(duration)
+		o.readTimeoutCh = time.Tick(duration)
 		o.readTimeoutFunc = readTimeoutFunc
 		return nil
 	}
@@ -50,7 +50,7 @@ func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc
 // WithSendTimeout sets a duration for which the connection will wait for a message to be sent.
 func WithSendTimeout(duration time.Duration) Option {
 	return func(o *options) error {
-		o.sendTimeoutCh = time.After(duration)
+		o.sendTimeoutCh = time.Tick(duration)
 		return nil
 	}
 }

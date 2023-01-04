@@ -25,6 +25,22 @@ import (
 type testServer struct {
 	Addr   string
 	Server *testserver.TestServer
+
+	mutex         sync.Mutex
+	receivedPings int
+}
+
+func (t *testServer) IncrementPings() {
+	t.mutex.Lock()
+	t.receivedPings++
+	t.mutex.Unlock()
+}
+
+func (t *testServer) ReceivedPings() int {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	return t.receivedPings
 }
 
 func (t *testServer) Shutdown() {
@@ -50,6 +66,8 @@ func (t *testServer) Handler() testserver.Handler {
 			go func() {
 				switch payload {
 				case "ping":
+					log.Println("server: received ping")
+					t.IncrementPings()
 					rwc.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
 				case "sign_on":
 					rwc.Write([]byte(fmt.Sprintf("%s,signed_on\n", id)))
@@ -540,6 +558,55 @@ func TestClient_Send(t *testing.T) {
 
 		if results[1].ID != "1" {
 			t.Fatalf("expected result with ID \"1\", got %q", results[1].ID)
+		}
+	})
+	t.Run("automatically sends ping messages after write timeout interval", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		pingHandler := func(c *connection.Connection) {
+			// Generate random ID
+			id := fmt.Sprintf("%v", rand.Int63())
+			result, err := c.Send(connection.Message{ID: id, Payload: "ping"})
+			if err != nil {
+				if errors.Is(err, connection.ErrConnectionClosed) {
+					return
+				}
+
+				t.Fatalf("error sending message: %v", err)
+			}
+
+			if result.Payload.(string) != "pong" {
+				t.Fatalf("result: %v, expected signed_on", result)
+			}
+		}
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler,
+			connection.WithWriteTimeoutFunc(25*time.Millisecond, pingHandler))
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+		defer c.Close()
+
+		// We expect that ping interval in 50ms has not passed yet
+		// and server has not being pinged yet.
+		if server.ReceivedPings() != 0 {
+			t.Fatalf("expected 0 received pings, got %v", server.receivedPings)
+		}
+
+		time.Sleep(200 * time.Millisecond)
+
+		// On average, we expect that server has been pinged 7 times.
+		// We use 5 as a threshold to avoid flaky tests.
+		if server.ReceivedPings() < 5 {
+			t.Fatalf("expected at least 3 received ping, got %v", server.receivedPings)
 		}
 	})
 }
