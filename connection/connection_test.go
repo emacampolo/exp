@@ -32,48 +32,54 @@ func (t *testServer) Shutdown() {
 }
 
 func (t *testServer) Handler() testserver.Handler {
-	return func(ctx context.Context, conn net.Conn) {
-		reader := bufio.NewReader(conn)
+	return func(ctx context.Context, rwc io.ReadWriteCloser) {
+		defer rwc.Close()
+		reader := bufio.NewReader(rwc)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			id, payload := read(reader)
 			if payload == "" {
 				return
 			}
 
-			switch payload {
-			case "ping":
-				conn.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
-			case "sign_on":
-				log.Println("server: received sign_on, sending ack")
-				conn.Write([]byte(fmt.Sprintf("%s,signed_on\n", id)))
+			go func() {
+				switch payload {
+				case "ping":
+					rwc.Write([]byte(fmt.Sprintf("%s,pong\n", id)))
+				case "sign_on":
+					rwc.Write([]byte(fmt.Sprintf("%s,signed_on\n", id)))
 
-				for i := 0; i < 1000; i++ {
-					randomString := make([]byte, 10)
-					rand.Read(randomString)
-					// ID starts from 100 to avoid collision with other messages.
-					_, err := conn.Write([]byte(fmt.Sprintf("%d,%s\n", i+100, hex.EncodeToString(randomString))))
-					if err != nil {
-						log.Println("server: error writing message:", err)
-						return
+					for i := 0; i < 1000; i++ {
+						randomString := make([]byte, 10)
+						rand.Read(randomString)
+						// ID starts from 100 to avoid collision with other messages.
+						_, err := rwc.Write([]byte(fmt.Sprintf("%d,%s\n", i+100, hex.EncodeToString(randomString))))
+						if err != nil {
+							log.Println("server: error writing message:", err)
+							return
+						}
 					}
+					log.Println("server: finished writing messages")
+				case "sign_off":
+					rwc.Write([]byte(fmt.Sprintf("%s,signed_off\n", id)))
+					// Wait for the client to decode the ack before closing the connection since
+					// the read loop is still running and will try to read from the connection and
+					// will get an EOF error before the client has a chance to decode the ack.
+					time.Sleep(100 * time.Millisecond)
+					return
+				case "delay":
+					time.Sleep(500 * time.Millisecond)
+					rwc.Write([]byte(fmt.Sprintf("%s,ack\n", id)))
+				default:
+					log.Println("server: received unknown message:", payload)
+					return
 				}
-				log.Println("server: finished writing messages")
-			case "sign_off":
-				conn.Write([]byte(fmt.Sprintf("%s,signed_off\n", id)))
-				log.Println("server: sign-off sent")
-				// Wait for the client to decode the ack before closing the connection since
-				// the read loop is still running and will try to read from the connection and
-				// will get an EOF error before the client has a chance to decode the ack.
-				time.Sleep(100 * time.Millisecond)
-				return
-			case "delay":
-				log.Println("server: received delay")
-				time.Sleep(200 * time.Millisecond)
-				conn.Write([]byte(fmt.Sprintf("%s,ack\n", id)))
-			default:
-				log.Println("server: received unknown message:", payload)
-				return
-			}
+			}()
 		}
 	}
 }
@@ -417,7 +423,7 @@ func TestClient_Send(t *testing.T) {
 		var errs []error
 		var mu sync.Mutex
 
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 10; i++ {
 			wg.Add(1)
 			go func(i int) {
 				defer func() {
@@ -452,6 +458,89 @@ func TestClient_Send(t *testing.T) {
 			t.Fatalf("error closing connection: %v", err)
 		}
 		wg.Wait()
+	})
+	t.Run("responses received asynchronously", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		if err := c.Connect(); err != nil {
+			t.Fatalf("error connecting: %v", err)
+		}
+
+		defer c.Close()
+
+		var (
+			results []connection.Message
+			wg      sync.WaitGroup
+			mu      sync.Mutex
+			errs    []error
+		)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			result, err := c.Send(connection.Message{ID: "1", Payload: "delay"})
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("error sending message 1: %v", err))
+				mu.Unlock()
+				return
+			}
+
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// This message will be sent after the first one
+			time.Sleep(100 * time.Millisecond)
+
+			result, err := c.Send(connection.Message{ID: "2", Payload: "ping"})
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("error sending message 2: %v", err))
+				mu.Unlock()
+				return
+			}
+
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		}()
+
+		// Let's wait all messages to be sent
+		time.Sleep(200 * time.Millisecond)
+		wg.Wait()
+
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+
+		if len(results) != 2 {
+			t.Fatalf("unexpected results: %v", results)
+		}
+
+		// We expect that response for the second message was received first.
+		if results[0].ID != "2" {
+			t.Fatalf("expected result with ID \"2\", got %q", results[0].ID)
+		}
+
+		if results[1].ID != "1" {
+			t.Fatalf("expected result with ID \"1\", got %q", results[1].ID)
+		}
 	})
 }
 

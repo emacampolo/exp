@@ -2,20 +2,22 @@ package testserver
 
 import (
 	"context"
+	"io"
 	"net"
 	"sync"
 )
 
 // The Handler type is allows clients to process incoming tcp connections.
 // The provided context is canceled on Shutdown.
-type Handler func(ctx context.Context, conn net.Conn)
+type Handler func(ctx context.Context, rwc io.ReadWriteCloser)
 
 // A TestServer defines parameters for running an TCP server.
 type TestServer struct {
 	handler Handler
 
-	mu sync.Mutex
-	wg sync.WaitGroup
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	closing bool
 
 	l         net.Listener
 	ctx       context.Context
@@ -43,11 +45,16 @@ func (s *TestServer) Listen() {
 		}
 
 		s.mu.Lock()
+		if s.closing {
+			s.mu.Unlock()
+			conn.Close()
+			return
+		}
 		s.wg.Add(1)
 		s.mu.Unlock()
+
 		go func(c net.Conn) {
 			s.handler(s.ctx, c)
-			c.Close()
 			s.wg.Done()
 		}(conn)
 	}
@@ -56,11 +63,17 @@ func (s *TestServer) Listen() {
 func (s *TestServer) Shutdown() {
 	s.l.Close()
 
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return
+	}
+	s.closing = true
+	s.mu.Unlock()
+
 	// Canceling context.
 	s.ctxCancel()
 
 	// Wait for active connections to close.
-	s.mu.Lock()
 	s.wg.Wait()
-	s.mu.Unlock()
 }
