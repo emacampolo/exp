@@ -188,6 +188,7 @@ func (c *Connection) Close() error {
 }
 
 func (c *Connection) close() error {
+	defer c.stopTickersFunc()
 	c.messagesWg.Wait()
 
 	close(c.done)
@@ -199,7 +200,6 @@ func (c *Connection) close() error {
 		}
 	}
 
-	c.stopTickersFunc()
 	return nil
 }
 
