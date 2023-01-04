@@ -6,28 +6,33 @@ import (
 )
 
 type options struct {
-	writeTimeoutCh   <-chan time.Time
-	writeTimeoutFunc WriteTimeoutFunc
+	writeTimeoutCh     <-chan time.Time
+	writeTimeoutTicker *time.Ticker
+	writeTimeoutFunc   WriteTimeoutFunc
 
-	readTimeoutCh   <-chan time.Time
-	readTimeoutFunc ReadTimeoutFunc
+	readTimeoutCh     <-chan time.Time
+	readTimeoutTicker *time.Ticker
+	readTimeoutFunc   ReadTimeoutFunc
 
 	sendTimeoutCh <-chan time.Time
 
-	dialTimeout time.Duration
+	sendTimeoutTicker *time.Ticker
+	dialTimeout       time.Duration
 }
 
 type Option func(*options) error
 
 // WithWriteTimeoutFunc sets a duration after which the connection is considered idle
 // and the idle function is called.
-// If duration is 0, the connection will never be considered idle.
+// The duration must be greater than 0.
 func WithWriteTimeoutFunc(duration time.Duration, writeTimeoutFunc WriteTimeoutFunc) Option {
 	return func(o *options) error {
-		if duration == 0 && writeTimeoutFunc != nil {
-			return fmt.Errorf("write timeout is set but write timeout duration is 0")
+		if duration <= 0 {
+			return fmt.Errorf("write timeout duration must be greater than 0")
 		}
-		o.writeTimeoutCh = time.Tick(duration)
+
+		o.writeTimeoutTicker = time.NewTicker(duration)
+		o.writeTimeoutCh = o.writeTimeoutTicker.C
 		o.writeTimeoutFunc = writeTimeoutFunc
 		return nil
 	}
@@ -35,22 +40,30 @@ func WithWriteTimeoutFunc(duration time.Duration, writeTimeoutFunc WriteTimeoutF
 
 // WithReadTimeoutFunc sets a duration for which the connection will wait for a message to be received.
 // If duration is reached, the read timeout function is called.
-// If duration is 0, the connection will never time out.
+// The duration must be greater than 0.
 func WithReadTimeoutFunc(duration time.Duration, readTimeoutFunc ReadTimeoutFunc) Option {
 	return func(o *options) error {
-		if duration == 0 && readTimeoutFunc != nil {
-			return fmt.Errorf("read timeout function is set but read timeout duration is 0")
+		if duration <= 0 {
+			return fmt.Errorf("read timeout duration must be greater than 0")
 		}
-		o.readTimeoutCh = time.Tick(duration)
+
+		o.readTimeoutTicker = time.NewTicker(duration)
+		o.readTimeoutCh = o.readTimeoutTicker.C
 		o.readTimeoutFunc = readTimeoutFunc
 		return nil
 	}
 }
 
 // WithSendTimeout sets a duration for which the connection will wait for a message to be sent.
+// The duration must be greater than 0.
 func WithSendTimeout(duration time.Duration) Option {
 	return func(o *options) error {
-		o.sendTimeoutCh = time.Tick(duration)
+		if duration <= 0 {
+			return fmt.Errorf("send timeout duration must be greater than 0")
+		}
+
+		o.sendTimeoutTicker = time.NewTicker(duration)
+		o.sendTimeoutCh = o.sendTimeoutTicker.C
 		return nil
 	}
 }
@@ -58,6 +71,9 @@ func WithSendTimeout(duration time.Duration) Option {
 // WithDialTimeout sets a duration for which the dialer will wait for a connection to be established.
 func WithDialTimeout(duration time.Duration) Option {
 	return func(o *options) error {
+		if duration < 0 {
+			return fmt.Errorf("dial timeout duration must be greater than 0")
+		}
 		o.dialTimeout = duration
 		return nil
 	}
@@ -65,11 +81,6 @@ func WithDialTimeout(duration time.Duration) Option {
 
 func defaultOptions() options {
 	return options{
-		writeTimeoutCh:   nil,
-		writeTimeoutFunc: nil,
-		readTimeoutCh:    nil,
-		readTimeoutFunc:  nil,
-		sendTimeoutCh:    nil,
-		dialTimeout:      5 * time.Second,
+		dialTimeout: 5 * time.Second,
 	}
 }

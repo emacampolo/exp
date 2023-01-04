@@ -82,6 +82,8 @@ type Connection struct {
 	mutex      sync.Mutex // guards messagesWg and closing.
 	messagesWg sync.WaitGroup
 	closing    bool
+
+	stopTickersFunc func()
 }
 
 // New creates a new connection to the server.
@@ -93,6 +95,22 @@ func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshale
 			return nil, fmt.Errorf("applying option: %v", err)
 		}
 	}
+
+	// When the connection is closed, stop all the tickers to avoid leakage.
+	stopTickersFunc := func() {
+		if opts.writeTimeoutTicker != nil {
+			opts.writeTimeoutTicker.Stop()
+		}
+
+		if opts.readTimeoutTicker != nil {
+			opts.readTimeoutTicker.Stop()
+		}
+
+		if opts.sendTimeoutTicker != nil {
+			opts.sendTimeoutTicker.Stop()
+		}
+	}
+
 	return &Connection{
 		network:            network,
 		address:            address,
@@ -106,6 +124,8 @@ func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshale
 		incomingChannel:  make(chan []byte),
 		done:             make(chan struct{}),
 		pendingResponses: make(map[string]response),
+
+		stopTickersFunc: stopTickersFunc,
 	}, nil
 }
 
@@ -179,6 +199,7 @@ func (c *Connection) close() error {
 		}
 	}
 
+	c.stopTickersFunc()
 	return nil
 }
 
