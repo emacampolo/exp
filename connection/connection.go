@@ -73,7 +73,6 @@ type Connection struct {
 
 	encodeDecoder      EncodeDecoder
 	marshalUnmarshaler MarshalUnmarshaler
-	errHandler         ErrorHandler
 	handler            InboundMessageHandler
 
 	pendingResponsesMutex sync.Mutex // guards pendingResponses map.
@@ -88,7 +87,7 @@ type Connection struct {
 
 // New creates a new connection to the server.
 // All the argument but the options are required.
-func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
+func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, options ...Option) (*Connection, error) {
 	opts := defaultOptions()
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
@@ -117,7 +116,6 @@ func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshale
 		encodeDecoder:      encodeDecoder,
 		marshalUnmarshaler: marshalUnmarshaler,
 		handler:            handler,
-		errHandler:         errHandler,
 
 		options:          opts,
 		outgoingChannel:  make(chan request),
@@ -131,8 +129,8 @@ func New(network, address string, encodeDecoder EncodeDecoder, marshalUnmarshale
 
 // NewFrom creates a new connection from an existing connection.
 // All the argument but the options are required.
-func NewFrom(conn io.ReadWriteCloser, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, errHandler ErrorHandler, options ...Option) (*Connection, error) {
-	c, err := New("", "", encodeDecoder, marshalUnmarshaler, handler, errHandler, options...)
+func NewFrom(conn io.ReadWriteCloser, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, options ...Option) (*Connection, error) {
+	c, err := New("", "", encodeDecoder, marshalUnmarshaler, handler, options...)
 	if err != nil {
 		return nil, fmt.Errorf("creating connection: %w", err)
 	}
@@ -353,7 +351,7 @@ func (c *Connection) writeLoop() {
 }
 
 func (c *Connection) handleError(err error) {
-	if c.errHandler == nil {
+	if c.options.errorHandler == nil {
 		return
 	}
 
@@ -366,7 +364,7 @@ func (c *Connection) handleError(err error) {
 	}
 	c.mutex.Unlock()
 
-	go c.errHandler(err)
+	go c.options.errorHandler(err)
 }
 
 // handlerConnectionError is called when we get an error when reading or writing to the connection.

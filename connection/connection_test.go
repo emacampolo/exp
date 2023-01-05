@@ -189,10 +189,6 @@ var alwaysPanicHandler = func(c *connection.Connection, message connection.Messa
 	panic("always fail")
 }
 
-var alwaysPanicErrorHandler = func(err error) {
-	panic(err)
-}
-
 func TestClient_Connect(t *testing.T) {
 	t.Run("connect", func(t *testing.T) {
 		server, err := newTestServer()
@@ -201,7 +197,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
 
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
@@ -216,7 +212,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 	})
 	t.Run("connect times out", func(t *testing.T) {
-		c, err := connection.New("tcp", "10.0.0.0:50000", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
+		c, err := connection.New("tcp", "10.0.0.0:50000", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithDialTimeout(2*time.Second))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -241,7 +237,7 @@ func TestClient_Connect(t *testing.T) {
 		}
 	})
 	t.Run("no panic when Close before Connect", func(t *testing.T) {
-		c, err := connection.New("tcp", "", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler, connection.WithDialTimeout(2*time.Second))
+		c, err := connection.New("tcp", "", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithDialTimeout(2*time.Second))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -260,7 +256,7 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -296,11 +292,11 @@ func TestClient_Send(t *testing.T) {
 			time.Sleep(1 * time.Second)
 		}
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, handler, func(err error) {
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, handler, connection.WithErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
 				t.Errorf("unexpected error: %v", err)
 			}
-		})
+		}))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -345,11 +341,11 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
 				t.Errorf("unexpected error: %v", err)
 			}
-		})
+		}))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -374,11 +370,11 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
 				t.Errorf("unexpected error: %v", err)
 			}
-		}, connection.WithSendTimeout(100*time.Millisecond))
+		}), connection.WithSendTimeout(100*time.Millisecond))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -401,11 +397,11 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
 				t.Errorf("unexpected error: %v", err)
 			}
-		}, connection.WithSendTimeout(100*time.Millisecond))
+		}), connection.WithSendTimeout(100*time.Millisecond))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -428,7 +424,7 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -484,7 +480,7 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler)
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
@@ -584,7 +580,7 @@ func TestClient_Send(t *testing.T) {
 			}
 		}
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, alwaysPanicErrorHandler,
+		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler,
 			connection.WithWriteTimeoutFunc(25*time.Millisecond, pingHandler))
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
@@ -626,11 +622,11 @@ func benchmarkSend(m int, b *testing.B) {
 	}
 	defer server.Shutdown()
 
-	c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, func(err error) {
+	c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
 		if !errors.Is(err, io.EOF) {
 			b.Errorf("unexpected error: %v", err)
 		}
-	})
+	}))
 
 	if err != nil {
 		b.Fatalf("error creating connection: %v", err)

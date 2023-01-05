@@ -18,6 +18,8 @@ type options struct {
 
 	sendTimeoutTicker *time.Ticker
 	dialTimeout       time.Duration
+
+	errorHandler ErrorHandler
 }
 
 type Option func(*options) error
@@ -75,6 +77,16 @@ func WithDialTimeout(duration time.Duration) Option {
 			return fmt.Errorf("dial timeout duration must be greater than 0")
 		}
 		o.dialTimeout = duration
+		return nil
+	}
+}
+
+// WithErrorHandler sets a function to be called when an error occurs while trying
+// to unmarshal a message or when an error occurs while trying to write a message to the connection.
+// The error handler is called with the error that occurred.
+func WithErrorHandler(errorHandler ErrorHandler) Option {
+	return func(o *options) error {
+		o.errorHandler = errorHandler
 		return nil
 	}
 }
