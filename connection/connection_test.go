@@ -140,14 +140,11 @@ func read(reader *bufio.Reader) (string, string) {
 }
 
 func newTestServer() (*testServer, error) {
-	return newTestServerWithAddr("127.0.0.1:")
+	return newTestServerWithAddr("127.0.0.1:0")
 }
 
 // encodeDecoder implements a connection.EncodeDecoder that uses a new line as a delimiter for messages.
-type encodeDecoder struct {
-	buff *bufio.Reader
-	once sync.Once
-}
+type encodeDecoder struct{}
 
 func (ed *encodeDecoder) Encode(writer io.Writer, message []byte) error {
 	writer.Write(message)
@@ -155,18 +152,31 @@ func (ed *encodeDecoder) Encode(writer io.Writer, message []byte) error {
 	return nil
 }
 
-func (ed *encodeDecoder) Decode(reader io.Reader) (b []byte, err error) {
-	ed.once.Do(func() {
-		ed.buff = bufio.NewReader(reader)
-	})
+func (ed *encodeDecoder) Decode(reader io.Reader) ([]byte, error) {
+	return readLine(reader)
+}
 
-	b, err = ed.buff.ReadBytes('\n')
-	if err != nil {
-		return nil, err
+// readLine reads a line from the reader until it encounters a new line character.
+// The new line is not included in the returned message.
+// We should not read more bytes than required to find the new line since the reader is a stream.
+// If we read more bytes than required, the next call to Decode will read from the same stream and will read the bytes that we read here.
+// This will cause the message to be corrupted.
+func readLine(reader io.Reader) ([]byte, error) {
+	var message []byte
+	for {
+		b := make([]byte, 1)
+		_, err := reader.Read(b)
+		if err != nil {
+			return nil, err
+		}
+
+		if b[0] == '\n' {
+			break
+		}
+
+		message = append(message, b[0])
 	}
-	// Strip the newline.
-	b = bytes.TrimSpace(b)
-	return b, nil
+	return message, nil
 }
 
 // marshalUnmarshal implements a connection.MarshalUnmarshaler that assume that the connection.Message payload is a string.
@@ -185,11 +195,11 @@ func (marshalUnmarshal) Unmarshal(data []byte) (connection.Message, error) {
 	return connection.Message{ID: string(id), Payload: string(payload)}, nil
 }
 
-var alwaysPanicHandler = func(c *connection.Connection, message connection.Message) {
+var alwaysPanicHandler = func(c connection.Connection, message connection.Message) {
 	panic("always fail")
 }
 
-func TestClient_Connect(t *testing.T) {
+func TestConnection_Connect(t *testing.T) {
 	t.Run("connect", func(t *testing.T) {
 		server, err := newTestServer()
 		if err != nil {
@@ -197,58 +207,30 @@ func TestClient_Connect(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			connection.NewOptions(),
+		)
 
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-
-		if err := c.Close(); err != nil {
-			t.Fatalf("error closing connection: %v", err)
-		}
-	})
-	t.Run("connect times out", func(t *testing.T) {
-		c, err := connection.New("tcp", "10.0.0.0:50000", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithDialTimeout(2*time.Second))
-		if err != nil {
-			t.Fatalf("error creating connection: %v", err)
-		}
-
-		start := time.Now()
-		err = c.Connect()
-		end := time.Now()
-		delta := end.Sub(start)
-
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-
-		// Test against triple the timeout value to be safe, which should also be well under any OS specific socket timeout.
-		// Realistically, the delta should nearly always be exactly 2 seconds.
-		if delta < 2*time.Second || delta > 6*time.Second {
-			t.Fatalf("expected timeout to be between 2 and 6 seconds, got %v", delta)
-		}
-
-		if err := c.Close(); err != nil {
-			t.Fatalf("error closing connection: %v", err)
-		}
-	})
-	t.Run("no panic when Close before Connect", func(t *testing.T) {
-		c, err := connection.New("tcp", "", &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithDialTimeout(2*time.Second))
-		if err != nil {
-			t.Fatalf("error creating connection: %v", err)
-		}
-
-		if err := c.Close(); err != nil {
+		if err := conn.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}
 	})
 }
 
-func TestClient_Send(t *testing.T) {
+func TestConnection_Send(t *testing.T) {
 	t.Run("send messages to server and receives responses", func(t *testing.T) {
 		server, err := newTestServer()
 		if err != nil {
@@ -256,16 +238,24 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			connection.NewOptions(),
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-
-		result, err := c.Send(connection.Message{ID: "1", Payload: "ping"})
+		result, err := conn.Send(connection.Message{ID: "1", Payload: "ping"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -274,7 +264,7 @@ func TestClient_Send(t *testing.T) {
 			t.Fatalf("unexpected result: %v", result)
 		}
 
-		if err := c.Close(); err != nil {
+		if err := conn.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}
 	})
@@ -286,26 +276,37 @@ func TestClient_Send(t *testing.T) {
 		defer server.Shutdown()
 
 		var count atomic.Int64
-		handler := func(connection *connection.Connection, message connection.Message) {
+		handler := func(connection connection.Connection, message connection.Message) {
 			// Simulate a long running task.
 			count.Add(1)
 			time.Sleep(1 * time.Second)
 		}
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, handler, connection.WithErrorHandler(func(err error) {
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
-				t.Errorf("unexpected error: %v", err)
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}))
+		})
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			handler,
+			options,
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-
-		result, err := c.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		result, err := conn.Send(connection.Message{ID: "1", Payload: "sign_on"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -317,7 +318,7 @@ func TestClient_Send(t *testing.T) {
 		log.Println("waiting for all messages to be handled")
 		time.Sleep(1 * time.Second)
 
-		result, err = c.Send(connection.Message{ID: "1", Payload: "sign_off"})
+		result, err = conn.Send(connection.Message{ID: "1", Payload: "sign_off"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -326,7 +327,7 @@ func TestClient_Send(t *testing.T) {
 			t.Fatalf("result: %v, expected signed_off", result)
 		}
 
-		if err := c.Close(); err != nil {
+		if err := conn.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}
 
@@ -341,24 +342,35 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
-				t.Errorf("unexpected error: %v", err)
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}))
+		})
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			options,
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-
-		if err := c.Close(); err != nil {
+		if err := conn.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}
 
-		_, err = c.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		_, err = conn.Send(connection.Message{ID: "1", Payload: "sign_on"})
 		if !errors.Is(err, connection.ErrConnectionClosed) {
 			t.Fatalf("expected ErrConnectionClosed, got %v", err)
 		}
@@ -370,22 +382,36 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		if err := options.SetSendTimeout(100 * time.Millisecond); err != nil {
+			t.Fatalf("error setting send timeout: %v", err)
+		}
+		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
-				t.Errorf("unexpected error: %v", err)
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}), connection.WithSendTimeout(100*time.Millisecond))
+		})
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			options,
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
+		defer conn.Close()
 
-		defer c.Close()
-
-		_, err = c.Send(connection.Message{ID: "1", Payload: "delay"})
+		_, err = conn.Send(connection.Message{ID: "1", Payload: "delay"})
 		if !errors.Is(err, connection.ErrSendTimeout) {
 			t.Fatalf("expected ErrSendTimeout, got %v", err)
 		}
@@ -397,22 +423,36 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		if err := options.SetSendTimeout(100 * time.Millisecond); err != nil {
+			t.Fatalf("error setting send timeout: %v", err)
+		}
+		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
-				t.Errorf("unexpected error: %v", err)
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}), connection.WithSendTimeout(100*time.Millisecond))
+		})
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			options,
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
+		defer conn.Close()
 
-		defer c.Close()
-
-		_, err = c.Send(connection.Message{Payload: "delay"})
+		_, err = conn.Send(connection.Message{Payload: "delay"})
 		if err == nil || err.Error() != "message ID is empty" {
 			t.Fatalf("expected error with \"message ID is empty\", got %q", err.Error())
 		}
@@ -424,13 +464,21 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
+		netConn, err := net.Dial("tcp", server.Addr)
 		if err != nil {
-			t.Fatalf("error creating connection: %v", err)
+			t.Fatalf("error dialing test server: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			connection.NewOptions(),
+		)
+
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
 		}
 
 		var wg sync.WaitGroup
@@ -445,7 +493,7 @@ func TestClient_Send(t *testing.T) {
 				}()
 
 				id := fmt.Sprintf("%v", i+1)
-				result, err := c.Send(connection.Message{ID: id, Payload: "delay"})
+				result, err := conn.Send(connection.Message{ID: id, Payload: "delay"})
 				if err != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Errorf("error sending message: %v", err))
@@ -468,7 +516,7 @@ func TestClient_Send(t *testing.T) {
 
 		// Let's wait all messages to be sent
 		time.Sleep(100 * time.Millisecond)
-		if err := c.Close(); err != nil {
+		if err := conn.Close(); err != nil {
 			t.Fatalf("error closing connection: %v", err)
 		}
 		wg.Wait()
@@ -480,16 +528,24 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler)
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			connection.NewOptions(),
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-
-		defer c.Close()
+		defer conn.Close()
 
 		var (
 			results []connection.Message
@@ -502,7 +558,7 @@ func TestClient_Send(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			result, err := c.Send(connection.Message{ID: "1", Payload: "delay"})
+			result, err := conn.Send(connection.Message{ID: "1", Payload: "delay"})
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("error sending message 1: %v", err))
@@ -522,7 +578,7 @@ func TestClient_Send(t *testing.T) {
 			// This message will be sent after the first one
 			time.Sleep(100 * time.Millisecond)
 
-			result, err := c.Send(connection.Message{ID: "2", Payload: "ping"})
+			result, err := conn.Send(connection.Message{ID: "2", Payload: "ping"})
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("error sending message 2: %v", err))
@@ -563,7 +619,7 @@ func TestClient_Send(t *testing.T) {
 		}
 		defer server.Shutdown()
 
-		pingHandler := func(c *connection.Connection) {
+		pingHandler := func(c connection.Connection) {
 			// Generate random ID
 			id := fmt.Sprintf("%v", rand.Int63())
 			result, err := c.Send(connection.Message{ID: id, Payload: "ping"})
@@ -580,16 +636,29 @@ func TestClient_Send(t *testing.T) {
 			}
 		}
 
-		c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler,
-			connection.WithWriteTimeoutFunc(25*time.Millisecond, pingHandler))
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		if err := options.SetWriteTimeoutFunc(25*time.Millisecond, pingHandler); err != nil {
+			t.Fatalf("error setting write timeout: %v", err)
+		}
+
+		conn, err := connection.New(
+			netConn,
+			&encodeDecoder{},
+			marshalUnmarshal{},
+			alwaysPanicHandler,
+			options,
+		)
+
 		if err != nil {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		if err := c.Connect(); err != nil {
-			t.Fatalf("error connecting: %v", err)
-		}
-		defer c.Close()
+		defer conn.Close()
 
 		// We expect that ping interval in 50ms has not passed yet
 		// and server has not being pinged yet.
@@ -622,35 +691,44 @@ func benchmarkSend(m int, b *testing.B) {
 	}
 	defer server.Shutdown()
 
-	c, err := connection.New("tcp", server.Addr, &encodeDecoder{}, marshalUnmarshal{}, alwaysPanicHandler, connection.WithErrorHandler(func(err error) {
+	netConn, err := net.Dial("tcp", server.Addr)
+	if err != nil {
+		b.Fatalf("error dialing test server: %v", err)
+	}
+
+	options := connection.NewOptions()
+	options.SetErrorHandler(func(err error) {
 		if !errors.Is(err, io.EOF) {
-			b.Errorf("unexpected error: %v", err)
+			b.Fatalf("unexpected error: %v", err)
 		}
-	}))
+	})
+
+	conn, err := connection.New(
+		netConn,
+		&encodeDecoder{},
+		marshalUnmarshal{},
+		alwaysPanicHandler,
+		options,
+	)
 
 	if err != nil {
 		b.Fatalf("error creating connection: %v", err)
 	}
 
-	err = c.Connect()
-	if err != nil {
-		b.Fatal("connecting to the server: ", err)
-	}
-
 	b.ResetTimer()
 
 	for n := 0; n < b.N; n++ {
-		processMessages(b, m, c)
+		processMessages(b, m, conn)
 	}
 
-	err = c.Close()
+	err = conn.Close()
 	if err != nil {
 		b.Fatal("closing client: ", err)
 	}
 }
 
 // send/receive m messages
-func processMessages(b *testing.B, m int, c *connection.Connection) {
+func processMessages(b *testing.B, m int, conn connection.Connection) {
 	var wg sync.WaitGroup
 	var gerr error
 
@@ -659,7 +737,7 @@ func processMessages(b *testing.B, m int, c *connection.Connection) {
 		go func(i int) {
 			defer wg.Done()
 
-			result, err := c.Send(connection.Message{ID: strconv.Itoa(i), Payload: "ping"})
+			result, err := conn.Send(connection.Message{ID: strconv.Itoa(i), Payload: "ping"})
 			if err != nil {
 				gerr = err
 				return
