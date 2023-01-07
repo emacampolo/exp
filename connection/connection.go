@@ -266,21 +266,20 @@ func (c *connection) Send(message Message) (Message, error) {
 
 	c.outgoingChannel <- req
 
-	var response Message
+	var resp Message
 
 	select {
-	case response = <-req.replyCh:
+	case resp = <-req.replyCh:
 	case err = <-req.errCh:
-		return Message{}, err
 	case <-c.options.sendTimeoutCh:
-		return Message{}, ErrSendTimeout
+		err = ErrSendTimeout
 	}
 
 	c.pendingResponsesMutex.Lock()
 	delete(c.pendingResponses, req.requestID)
 	c.pendingResponsesMutex.Unlock()
 
-	return response, nil
+	return resp, err
 }
 
 // Reply implements the Connection interface.
@@ -312,7 +311,13 @@ func (c *connection) Reply(message Message) error {
 	}
 
 	c.outgoingChannel <- req
-	err = <-req.errCh
+
+	select {
+	case err = <-req.errCh:
+	case <-c.options.sendTimeoutCh:
+		err = ErrSendTimeout
+	}
+
 	return err
 }
 
