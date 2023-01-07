@@ -10,7 +10,7 @@ import (
 	"github.com/moov-io/iso8583/field"
 )
 
-// Example demonstrates how to use the connection package to send and receive ISO8583 messages.
+// This example demonstrates how to use the connection package to send and receive ISO8583 messages.
 // The connection will act as a client signing on to a fake VISA server.
 // The flow will be as follows:
 // 1. Client sends a sign on request to the server.
@@ -23,6 +23,9 @@ func Example() {
 	}
 	defer server.Shutdown()
 
+	// This handler is an implementation of a connection.InboundMessageHandler that will be called
+	// when a message is received from the server.
+	// It only changes the MTI of the message to a purchase response and sends it back to the server.
 	handler := func(connection connection.Connection, message connection.Message) {
 		m := message.Payload.(*iso8583.Message)
 		m.MTI("0210")
@@ -31,18 +34,21 @@ func Example() {
 		}
 	}
 
+	// Create a new connection to the server.
 	netConn, err := net.Dial("tcp", server.Addr)
 	if err != nil {
 		log.Fatalf("error dialing server: %v", err)
 	}
 
-	conn, err := connection.New(netConn, &iso8583EncodeDecoder{}, iso8583MarshalUnmarshal{}, handler, connection.NewOptions())
+	// Create a new connection from the net.Conn and the handler and default options.
+	conn, err := connection.New(netConn, iso8583EncodeDecoder{}, iso8583MarshalUnmarshal{}, handler, connection.NewOptions())
 	if err != nil {
 		log.Fatalf("error creating connection: %v", err)
 	}
 
 	defer conn.Close()
 
+	// Create a new ISO8583 message with the sign on request MTI.
 	message := iso8583.NewMessage(testSpec)
 	id := getSTAN()
 	err = message.Marshal(baseFields{
@@ -54,6 +60,7 @@ func Example() {
 		log.Fatalf("error marshaling message: %v", err)
 	}
 
+	// Send the sign on request to the server and wait for a response.
 	response, err := conn.Send(connection.Message{ID: id, Payload: message})
 	if err != nil {
 		log.Fatalf("error sending message: %v", err)

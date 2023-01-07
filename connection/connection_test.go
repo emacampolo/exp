@@ -146,13 +146,13 @@ func newTestServer() (*testServer, error) {
 // encodeDecoder implements a connection.EncodeDecoder that uses a new line as a delimiter for messages.
 type encodeDecoder struct{}
 
-func (ed *encodeDecoder) Encode(writer io.Writer, message []byte) error {
+func (ed encodeDecoder) Encode(writer io.Writer, message []byte) error {
 	writer.Write(message)
 	writer.Write([]byte("\n"))
 	return nil
 }
 
-func (ed *encodeDecoder) Decode(reader io.Reader) ([]byte, error) {
+func (ed encodeDecoder) Decode(reader io.Reader) ([]byte, error) {
 	return readLine(reader)
 }
 
@@ -214,7 +214,7 @@ func TestConnection_Connect(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			connection.NewOptions(),
@@ -245,7 +245,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			connection.NewOptions(),
@@ -296,7 +296,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			handler,
 			options,
@@ -356,7 +356,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			options,
@@ -399,7 +399,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			options,
@@ -440,7 +440,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			options,
@@ -471,7 +471,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			connection.NewOptions(),
@@ -535,7 +535,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			connection.NewOptions(),
@@ -648,7 +648,7 @@ func TestConnection_Send(t *testing.T) {
 
 		conn, err := connection.New(
 			netConn,
-			&encodeDecoder{},
+			encodeDecoder{},
 			marshalUnmarshal{},
 			alwaysPanicHandler,
 			options,
@@ -705,7 +705,7 @@ func benchmarkSend(m int, b *testing.B) {
 
 	conn, err := connection.New(
 		netConn,
-		&encodeDecoder{},
+		encodeDecoder{},
 		marshalUnmarshal{},
 		alwaysPanicHandler,
 		options,

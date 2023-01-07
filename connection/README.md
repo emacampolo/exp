@@ -7,3 +7,5 @@ The key differences are:
 - It provides a higher level abstraction for sending and receiving messages over a connection.
 - It ensures that when Close is called, the function will only return once all messages sent using `Send` or `Reply`
   have been processed, or any `Message` forwarded to `InboundMessageHandler` has finished being handled.
+
+For an example of how to use this package, see a [testable example](./example_test.go).

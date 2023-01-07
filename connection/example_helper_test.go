@@ -10,7 +10,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/emacampolo/exp/connection"
@@ -219,12 +218,9 @@ func newISO8583Server() (*iso8583Server, error) {
 	return newISO8583ServerWithAddr("127.0.0.1:")
 }
 
-type iso8583EncodeDecoder struct {
-	buff *bufio.Reader
-	once sync.Once
-}
+type iso8583EncodeDecoder struct{}
 
-func (ed *iso8583EncodeDecoder) Encode(writer io.Writer, message []byte) error {
+func (ed iso8583EncodeDecoder) Encode(writer io.Writer, message []byte) error {
 	var buf bytes.Buffer
 	_, err := writeMessageLength(&buf, len(message))
 	if err != nil {
@@ -240,18 +236,14 @@ func (ed *iso8583EncodeDecoder) Encode(writer io.Writer, message []byte) error {
 	return err
 }
 
-func (ed *iso8583EncodeDecoder) Decode(reader io.Reader) (b []byte, err error) {
-	ed.once.Do(func() {
-		ed.buff = bufio.NewReader(reader)
-	})
-
-	length, err := readMessageLength(ed.buff)
+func (ed iso8583EncodeDecoder) Decode(reader io.Reader) (b []byte, err error) {
+	length, err := readMessageLength(reader)
 	if err != nil {
 		return nil, fmt.Errorf("reading message length: %w", err)
 	}
 
 	rawMessage := make([]byte, length)
-	_, err = io.ReadFull(ed.buff, rawMessage)
+	_, err = io.ReadFull(reader, rawMessage)
 	if err != nil {
 		return nil, fmt.Errorf("reading message: %w", err)
 	}
