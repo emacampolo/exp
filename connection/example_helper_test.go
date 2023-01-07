@@ -111,7 +111,6 @@ func (t *iso8583Server) Handler() testserver.Handler {
 						log.Printf("error writing purchase request: %v", err)
 					}
 				}()
-
 			} else if mti == "0210" {
 				stan, err := message.GetString(11)
 				if err != nil {
@@ -278,5 +277,4 @@ func (iso8583MarshalUnmarshal) Unmarshal(data []byte) (connection.Message, error
 	}
 
 	return connection.Message{ID: id, Payload: message}, nil
-
 }

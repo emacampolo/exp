@@ -2,6 +2,7 @@ package connection_test
 
 import (
 	"log"
+	"net"
 	"time"
 
 	"github.com/emacampolo/exp/connection"
@@ -22,7 +23,7 @@ func Example() {
 	}
 	defer server.Shutdown()
 
-	handler := func(connection *connection.Connection, message connection.Message) {
+	handler := func(connection connection.Connection, message connection.Message) {
 		m := message.Payload.(*iso8583.Message)
 		m.MTI("0210")
 		if err := connection.Reply(message); err != nil {
@@ -30,13 +31,14 @@ func Example() {
 		}
 	}
 
-	conn, err := connection.New("tcp", server.Addr, &iso8583EncodeDecoder{}, iso8583MarshalUnmarshal{}, handler)
+	netConn, err := net.Dial("tcp", server.Addr)
 	if err != nil {
-		log.Fatalf("error creating connection: %v", err)
+		log.Fatalf("error dialing server: %v", err)
 	}
 
-	if err := conn.Connect(); err != nil {
-		log.Fatalf("error connecting: %v", err)
+	conn, err := connection.New(netConn, &iso8583EncodeDecoder{}, iso8583MarshalUnmarshal{}, handler, connection.NewOptions())
+	if err != nil {
+		log.Fatalf("error creating connection: %v", err)
 	}
 
 	defer conn.Close()
