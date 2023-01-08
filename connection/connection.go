@@ -9,33 +9,40 @@ import (
 	"sync"
 )
 
-// Connection represents a connection to a remote host. It requires a net.Conn which can be created using
-// net.Dial or net.Listen.
-// In the scope of this package, a Connection is a bidirectional communication channel between 2 hosts.
+// Connection represents a bidirectional communication channel between hosts.
 // It is worth mentioning that we don't use the term "client" and "server". Instead, we use the terms "host" and "remote host".
+// It requires a net.Conn which can be created using net.Dial or net.Listen.
+// Its main purpose is to send and receive messages.
+//   - To receive messages that are sent by the remote host, you need to implement the InboundMessageHandler function.
+//   - To send messages to the remote host, you can either use the Request function or the Send function.
+//     The difference between the two is that the Request resembles to the Request-Response pattern in that it expects
+//     a response from the remote host.
+//     The Send function doesn't expect a response from the remote host.
+//     In this regard, it can be related to the Fire-Forget pattern.
+//
 // It is important to close the underlying connection using the Close method of this interface
 // to ensure that all the resources are released properly and all the requests are completed.
 // It is safe to call methods of the connection from multiple goroutines.
 type Connection interface {
-	// Send sends message and waits for the response.
-	// If the response is not received within the timeout, it returns ErrSendTimeout.
+	// Request sends message and waits for the response as you would expect from the Request-Response pattern.
+	// It returns a ErrRequestTimeout error if the response is not received within the timeout.
 	// If the Connection is closed, it returns ErrConnectionClosed.
-	Send(message Message) (response Message, err error)
+	Request(message Message) (response Message, err error)
 
-	// Reply sends message and does not wait for the response.
+	// Send sends message and does not wait for the response as you would expect from the Fire-Forget pattern.
 	// If the Connection is closed, it returns ErrConnectionClosed.
-	Reply(message Message) error
+	Send(message Message) error
 
 	// Address returns the address of the host that the Connection is connected to.
 	Address() string
 
 	// Close closes the Connection. It waits for all requests to complete.
-	// It is safe to call Close multiple times.
+	// If the Connection is already closed, it returns nil.
+	// The underlying connection is closed as well.
 	Close() error
 }
 
-// InboundMessageHandler is a function that is called when a message is received from the remote host
-// and is not a response to a request sent using Connection.Send.
+// InboundMessageHandler is a function that is called when a message is received from the remote host.
 // The function is called in a separate goroutine.
 // The function should return a response to be sent back to the remote host.
 type InboundMessageHandler func(connection Connection, message Message)
@@ -53,8 +60,8 @@ type ReadTimeoutFunc func(connection Connection)
 var (
 	// ErrConnectionClosed is returned when the connection is closed by any of the parties.
 	ErrConnectionClosed = errors.New("connection closed")
-	// ErrSendTimeout is returned when the send timeout is reached.
-	ErrSendTimeout = errors.New("message send timeout")
+	// ErrRequestTimeout is returned when the request is not completed within the specified timeout.
+	ErrRequestTimeout = errors.New("request timeout")
 )
 
 // EncodeDecoder is responsible for encoding and decoding the byte representation of a Message.
@@ -152,8 +159,8 @@ func newConnection(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshale
 			options.readTimeoutTicker.Stop()
 		}
 
-		if options.sendTimeoutTicker != nil {
-			options.sendTimeoutTicker.Stop()
+		if options.requestTimeoutTicker != nil {
+			options.requestTimeoutTicker.Stop()
 		}
 	}
 
@@ -230,8 +237,8 @@ type response struct {
 	errCh   chan error
 }
 
-// Send implements the Connection interface.
-func (c *connection) Send(message Message) (Message, error) {
+// Request implements the Connection interface.
+func (c *connection) Request(message Message) (Message, error) {
 	c.closingMutex.Lock()
 	if c.closing {
 		c.closingMutex.Unlock()
@@ -271,8 +278,8 @@ func (c *connection) Send(message Message) (Message, error) {
 	select {
 	case resp = <-req.replyCh:
 	case err = <-req.errCh:
-	case <-c.options.sendTimeoutCh:
-		err = ErrSendTimeout
+	case <-c.options.requestTimeoutCh:
+		err = ErrRequestTimeout
 	}
 
 	c.pendingResponsesMutex.Lock()
@@ -282,8 +289,8 @@ func (c *connection) Send(message Message) (Message, error) {
 	return resp, err
 }
 
-// Reply implements the Connection interface.
-func (c *connection) Reply(message Message) error {
+// Send implements the Connection interface.
+func (c *connection) Send(message Message) error {
 	c.closingMutex.Lock()
 	if c.closing {
 		c.closingMutex.Unlock()
@@ -312,12 +319,7 @@ func (c *connection) Reply(message Message) error {
 
 	c.outgoingChannel <- req
 
-	select {
-	case err = <-req.errCh:
-	case <-c.options.sendTimeoutCh:
-		err = ErrSendTimeout
-	}
-
+	err = <-req.errCh
 	return err
 }
 
@@ -343,10 +345,9 @@ func (c *connection) writeLoop() {
 				break
 			}
 
-			// For replies (requests without replyCh) we just
-			// return nil to errCh as caller is waiting for error
-			// or send timeout. Regular requests waits for responses
-			// to be received to their replyCh channel.
+			// For messages using Send we just
+			// return nil to errCh as caller is waiting for error.
+			// Messages sent by Request waits for responses to be received to their replyCh channel.
 			if req.replyCh == nil {
 				req.errCh <- nil
 			}
@@ -398,7 +399,7 @@ func (c *connection) handleConnectionError(err error) {
 	}
 	c.pendingResponsesMutex.Unlock()
 
-	// Return the error to the callers of Send and Reply.
+	// Return the error to the callers of Request and Send.
 	go func() {
 		for {
 			select {
@@ -439,7 +440,7 @@ func (c *connection) readLoop() {
 }
 
 // handleLoop handles the incoming messages that are read from the socket by the readLoop.
-// The messages may correspond to the responses to the requests sent by the Send method
+// The messages may correspond to the responses to the requests sent by the Request method
 // or, they may be messages sent by the remote host to the local host without a previous request.
 func (c *connection) handleLoop() {
 	for {

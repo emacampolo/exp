@@ -255,7 +255,7 @@ func TestConnection_Send(t *testing.T) {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		result, err := conn.Send(connection.Message{ID: "1", Payload: "ping"})
+		result, err := conn.Request(connection.Message{ID: "1", Payload: "ping"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -306,7 +306,7 @@ func TestConnection_Send(t *testing.T) {
 			t.Fatalf("error creating connection: %v", err)
 		}
 
-		result, err := conn.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		result, err := conn.Request(connection.Message{ID: "1", Payload: "sign_on"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -318,7 +318,7 @@ func TestConnection_Send(t *testing.T) {
 		log.Println("waiting for all messages to be handled")
 		time.Sleep(1 * time.Second)
 
-		result, err = conn.Send(connection.Message{ID: "1", Payload: "sign_off"})
+		result, err = conn.Request(connection.Message{ID: "1", Payload: "sign_off"})
 		if err != nil {
 			t.Fatalf("error sending message: %v", err)
 		}
@@ -370,7 +370,7 @@ func TestConnection_Send(t *testing.T) {
 			t.Fatalf("error closing connection: %v", err)
 		}
 
-		_, err = conn.Send(connection.Message{ID: "1", Payload: "sign_on"})
+		_, err = conn.Request(connection.Message{ID: "1", Payload: "sign_on"})
 		if !errors.Is(err, connection.ErrConnectionClosed) {
 			t.Fatalf("expected ErrConnectionClosed, got %v", err)
 		}
@@ -388,8 +388,8 @@ func TestConnection_Send(t *testing.T) {
 		}
 
 		options := connection.NewOptions()
-		if err := options.SetSendTimeout(100 * time.Millisecond); err != nil {
-			t.Fatalf("error setting send timeout: %v", err)
+		if err := options.SetRequestTimeout(100 * time.Millisecond); err != nil {
+			t.Fatalf("error setting request timeout: %v", err)
 		}
 		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
@@ -411,9 +411,9 @@ func TestConnection_Send(t *testing.T) {
 
 		defer conn.Close()
 
-		_, err = conn.Send(connection.Message{ID: "1", Payload: "delay"})
-		if !errors.Is(err, connection.ErrSendTimeout) {
-			t.Fatalf("expected ErrSendTimeout, got %v", err)
+		_, err = conn.Request(connection.Message{ID: "1", Payload: "delay"})
+		if !errors.Is(err, connection.ErrRequestTimeout) {
+			t.Fatalf("expected ErrRequestTimeout, got %v", err)
 		}
 	})
 	t.Run("return error when the Message does not have an ID", func(t *testing.T) {
@@ -429,8 +429,8 @@ func TestConnection_Send(t *testing.T) {
 		}
 
 		options := connection.NewOptions()
-		if err := options.SetSendTimeout(100 * time.Millisecond); err != nil {
-			t.Fatalf("error setting send timeout: %v", err)
+		if err := options.SetRequestTimeout(100 * time.Millisecond); err != nil {
+			t.Fatalf("error setting request timeout: %v", err)
 		}
 		options.SetErrorHandler(func(err error) {
 			if !errors.Is(err, io.EOF) {
@@ -452,7 +452,7 @@ func TestConnection_Send(t *testing.T) {
 
 		defer conn.Close()
 
-		_, err = conn.Send(connection.Message{Payload: "delay"})
+		_, err = conn.Request(connection.Message{Payload: "delay"})
 		if err == nil || err.Error() != "message ID is empty" {
 			t.Fatalf("expected error with \"message ID is empty\", got %q", err.Error())
 		}
@@ -493,7 +493,7 @@ func TestConnection_Send(t *testing.T) {
 				}()
 
 				id := fmt.Sprintf("%v", i+1)
-				result, err := conn.Send(connection.Message{ID: id, Payload: "delay"})
+				result, err := conn.Request(connection.Message{ID: id, Payload: "delay"})
 				if err != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Errorf("error sending message: %v", err))
@@ -558,7 +558,7 @@ func TestConnection_Send(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			result, err := conn.Send(connection.Message{ID: "1", Payload: "delay"})
+			result, err := conn.Request(connection.Message{ID: "1", Payload: "delay"})
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("error sending message 1: %v", err))
@@ -578,7 +578,7 @@ func TestConnection_Send(t *testing.T) {
 			// This message will be sent after the first one
 			time.Sleep(100 * time.Millisecond)
 
-			result, err := conn.Send(connection.Message{ID: "2", Payload: "ping"})
+			result, err := conn.Request(connection.Message{ID: "2", Payload: "ping"})
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("error sending message 2: %v", err))
@@ -622,7 +622,7 @@ func TestConnection_Send(t *testing.T) {
 		pingHandler := func(c connection.Connection) {
 			// Generate random ID
 			id := fmt.Sprintf("%v", rand.Int63())
-			result, err := c.Send(connection.Message{ID: id, Payload: "ping"})
+			result, err := c.Request(connection.Message{ID: id, Payload: "ping"})
 			if err != nil {
 				if errors.Is(err, connection.ErrConnectionClosed) {
 					return
@@ -737,7 +737,7 @@ func processMessages(b *testing.B, m int, conn connection.Connection) {
 		go func(i int) {
 			defer wg.Done()
 
-			result, err := conn.Send(connection.Message{ID: strconv.Itoa(i), Payload: "ping"})
+			result, err := conn.Request(connection.Message{ID: strconv.Itoa(i), Payload: "ping"})
 			if err != nil {
 				gerr = err
 				return

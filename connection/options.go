@@ -15,9 +15,8 @@ type Options struct {
 	readTimeoutTicker *time.Ticker
 	readTimeoutFunc   ReadTimeoutFunc
 
-	sendTimeoutCh <-chan time.Time
-
-	sendTimeoutTicker *time.Ticker
+	requestTimeoutCh     <-chan time.Time
+	requestTimeoutTicker *time.Ticker
 
 	errorHandler ErrorHandler
 }
@@ -55,15 +54,15 @@ func (o *Options) SetReadTimeoutFunc(duration time.Duration, readTimeoutFunc Rea
 	return nil
 }
 
-// SetSendTimeout sets a duration for which the connection will wait for a message to be sent.
+// SetRequestTimeout sets a duration for which the connection will wait for a message to be sent.
 // The duration must be greater than 0.
-func (o *Options) SetSendTimeout(duration time.Duration) error {
+func (o *Options) SetRequestTimeout(duration time.Duration) error {
 	if duration <= 0 {
-		return fmt.Errorf("send timeout duration must be greater than 0")
+		return fmt.Errorf("request timeout duration must be greater than 0")
 	}
 
-	o.sendTimeoutTicker = time.NewTicker(duration)
-	o.sendTimeoutCh = o.sendTimeoutTicker.C
+	o.requestTimeoutTicker = time.NewTicker(duration)
+	o.requestTimeoutCh = o.requestTimeoutTicker.C
 	return nil
 }
 

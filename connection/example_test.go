@@ -29,7 +29,7 @@ func Example() {
 	handler := func(connection connection.Connection, message connection.Message) {
 		m := message.Payload.(*iso8583.Message)
 		m.MTI("0210")
-		if err := connection.Reply(message); err != nil {
+		if err := connection.Send(message); err != nil {
 			log.Fatalf("error replying to message: %v", err)
 		}
 	}
@@ -60,8 +60,8 @@ func Example() {
 		log.Fatalf("error marshaling message: %v", err)
 	}
 
-	// Send the sign on request to the server and wait for a response.
-	response, err := conn.Send(connection.Message{ID: id, Payload: message})
+	// Request the sign on request to the server and wait for a response.
+	response, err := conn.Request(connection.Message{ID: id, Payload: message})
 	if err != nil {
 		log.Fatalf("error sending message: %v", err)
 	}
