@@ -443,6 +443,18 @@ func (c *connection) Request(message Message) (Message, error) {
 	case err = <-req.errCh:
 	case <-c.options.requestTimeoutCh:
 		err = ErrRequestTimeout
+		// If the request times out it means that the caller will no longer wait for the response
+		// on the replyCh.
+		// If the response is received before removing the pending response from the map,
+		// the response will be lost.
+		// To avoid that, we forward the response to the InboundMessageHandler.
+		go func() {
+			select {
+			case resp = <-req.replyCh:
+				go c.handler(c, resp)
+			case <-c.done:
+			}
+		}()
 	}
 
 	c.pendingResponsesMutex.Lock()

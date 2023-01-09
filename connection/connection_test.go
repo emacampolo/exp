@@ -674,6 +674,63 @@ func TestConnection_Send(t *testing.T) {
 			t.Fatalf("expected at least 3 received ping, got %v", server.receivedPings)
 		}
 	})
+	t.Run("handles forgotten messages", func(t *testing.T) {
+		server, err := newTestServer()
+		if err != nil {
+			t.Fatalf("error creating test server: %v", err)
+		}
+		defer server.Shutdown()
+
+		netConn, err := net.Dial("tcp", server.Addr)
+		if err != nil {
+			t.Fatalf("error dialing test server: %v", err)
+		}
+
+		options := connection.NewOptions()
+		if err := options.SetRequestTimeout(500 * time.Millisecond); err != nil {
+			t.Fatalf("error setting request timeout: %v", err)
+		}
+		options.SetErrorHandler(func(err error) {
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+
+		var forgottenMessage connection.Message
+		done := make(chan struct{})
+		handler := func(c connection.Connection, message connection.Message) {
+			forgottenMessage = message
+			close(done)
+		}
+
+		conn, err := connection.New(
+			netConn,
+			encodeDecoder{},
+			marshalUnmarshal{},
+			handler,
+			options,
+		)
+
+		if err != nil {
+			t.Fatalf("error creating connection: %v", err)
+		}
+
+		defer conn.Close()
+
+		_, err = conn.Request(connection.Message{ID: "1", Payload: "delay"})
+		if !errors.Is(err, connection.ErrRequestTimeout) {
+			t.Fatalf("expected ErrRequestTimeout, got %v", err)
+		}
+
+		select {
+		case <-done:
+			if forgottenMessage.ID != "1" {
+				t.Fatalf("expected forgotten message with ID \"1\", got %q", forgottenMessage.ID)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("timeout waiting for forgotten message")
+		}
+	})
 }
 
 func BenchmarkSend100(b *testing.B) { benchmarkSend(100, b) }
