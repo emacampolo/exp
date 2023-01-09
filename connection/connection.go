@@ -206,11 +206,12 @@ func (c *connection) Close() error {
 }
 
 func (c *connection) close() error {
-	defer c.stopTickersFunc()
-	c.messagesWg.Wait()
-
+	// Last thing to do is mark this connection as done.
 	defer close(c.done)
 
+	defer c.stopTickersFunc()
+
+	c.messagesWg.Wait()
 	if err := c.conn.Close(); err != nil {
 		return fmt.Errorf("closing connection: %w", err)
 	}
@@ -218,7 +219,7 @@ func (c *connection) close() error {
 	return nil
 }
 
-// Done returns a channel that is closed when the connection is closed.
+// Done returns a channel that is closed when the connection is closed and all messages are handled.
 func (c *connection) Done() <-chan struct{} {
 	return c.done
 }
