@@ -191,18 +191,166 @@ func (c *connection) run() {
 	go c.handleLoop()
 }
 
-// Close implements the Connection interface.
-func (c *connection) Close() error {
-	c.closingMutex.Lock()
+// writeLoop read requests from the outgoingChannel and writes them to the connection.
+func (c *connection) writeLoop() {
+	var err error
 
+	for err == nil {
+		select {
+		case req := <-c.outgoingChannel:
+			if req.replyCh != nil {
+				c.pendingResponsesMutex.Lock()
+				c.pendingResponses[req.requestID] = response{
+					replyCh: req.replyCh,
+					errCh:   req.errCh,
+				}
+				c.pendingResponsesMutex.Unlock()
+			}
+
+			_, err = c.conn.Write(req.message)
+			if err != nil {
+				c.handleError(err)
+				break
+			}
+
+			// For messages using Send we just
+			// return nil to errCh as caller is waiting for error.
+			// Messages sent by Request waits for responses to be received to their replyCh channel.
+			if req.replyCh == nil {
+				req.errCh <- nil
+			}
+		case <-c.options.writeTimeoutCh:
+			if c.options.writeTimeoutFunc != nil {
+				go c.options.writeTimeoutFunc(c)
+			}
+		case <-c.done:
+			return
+		}
+	}
+
+	c.handleConnectionError(err)
+}
+
+// readLoop reads data from the socket and runs a goroutine to handle the message.
+// It reads data from the socket until the connection is closed.
+// We should not return from Close until all the messages are handled.
+func (c *connection) readLoop() {
+	var err error
+	var messageBytes []byte
+
+	for {
+		messageBytes, err = c.encodeDecoder.Decode(c.conn)
+		if err != nil {
+			c.handleError(err)
+			break
+		}
+
+		c.incomingChannel <- messageBytes
+	}
+
+	c.handleConnectionError(err)
+}
+
+// handleLoop handles the incoming messages that are read from the socket by the readLoop.
+// The messages may correspond to the responses to the requests sent by the Request method
+// or, they may be messages sent by the remote host to the local host without a previous request.
+func (c *connection) handleLoop() {
+	for {
+		select {
+		case rawBytes := <-c.incomingChannel:
+			go c.handleResponse(rawBytes)
+		case <-c.options.readTimeoutCh:
+			if c.options.readTimeoutFunc != nil {
+				go c.options.readTimeoutFunc(c)
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func (c *connection) handleResponse(rawBytes []byte) {
+	message, err := c.marshalUnmarshaler.Unmarshal(rawBytes)
+	if err != nil {
+		c.handleError(err)
+		return
+	}
+
+	c.pendingResponsesMutex.Lock()
+	response, found := c.pendingResponses[message.ID]
+	c.pendingResponsesMutex.Unlock()
+
+	if found {
+		response.replyCh <- message
+	} else {
+		c.closingMutex.Lock()
+		if c.closing {
+			c.closingMutex.Unlock()
+			return
+		}
+
+		c.messagesWg.Add(1)
+		c.closingMutex.Unlock()
+
+		c.handler(c, message)
+		c.messagesWg.Done()
+	}
+}
+
+func (c *connection) handleError(err error) {
+	if c.options.errorHandler == nil {
+		return
+	}
+
+	// When the connection is closed, it is expected that either the read or write loop will return an error.
+	// In that case, we don't need to call the error handler.
+	c.closingMutex.Lock()
 	if c.closing {
 		c.closingMutex.Unlock()
-		return nil
+		return
 	}
+	c.closingMutex.Unlock()
+
+	go c.options.errorHandler(err)
+}
+
+// handlerConnectionError is called when we get an error when reading or writing to the underlying connection.
+func (c *connection) handleConnectionError(err error) {
+	c.closingMutex.Lock()
+	if err == nil || c.closing {
+		c.closingMutex.Unlock()
+		return
+	}
+
 	c.closing = true
 	c.closingMutex.Unlock()
 
-	return c.close()
+	done := make(chan struct{})
+
+	c.pendingResponsesMutex.Lock()
+	for _, resp := range c.pendingResponses {
+		resp.errCh <- ErrConnectionClosed
+	}
+	c.pendingResponsesMutex.Unlock()
+
+	// Return the error to the callers of Request and Send.
+	go func() {
+		for {
+			select {
+			case req := <-c.outgoingChannel:
+				req.errCh <- ErrConnectionClosed
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		c.messagesWg.Wait()
+		done <- struct{}{}
+	}()
+
+	c.close()
 }
 
 func (c *connection) close() error {
@@ -217,6 +365,20 @@ func (c *connection) close() error {
 	}
 
 	return nil
+}
+
+// Close implements the Connection interface.
+func (c *connection) Close() error {
+	c.closingMutex.Lock()
+
+	if c.closing {
+		c.closingMutex.Unlock()
+		return nil
+	}
+	c.closing = true
+	c.closingMutex.Unlock()
+
+	return c.close()
 }
 
 // Done returns a channel that is closed when the connection is closed and all messages are handled.
@@ -322,166 +484,4 @@ func (c *connection) Send(message Message) error {
 
 	err = <-req.errCh
 	return err
-}
-
-// writeLoop read requests from the outgoingChannel and writes them to the connection.
-func (c *connection) writeLoop() {
-	var err error
-
-	for err == nil {
-		select {
-		case req := <-c.outgoingChannel:
-			if req.replyCh != nil {
-				c.pendingResponsesMutex.Lock()
-				c.pendingResponses[req.requestID] = response{
-					replyCh: req.replyCh,
-					errCh:   req.errCh,
-				}
-				c.pendingResponsesMutex.Unlock()
-			}
-
-			_, err = c.conn.Write(req.message)
-			if err != nil {
-				c.handleError(err)
-				break
-			}
-
-			// For messages using Send we just
-			// return nil to errCh as caller is waiting for error.
-			// Messages sent by Request waits for responses to be received to their replyCh channel.
-			if req.replyCh == nil {
-				req.errCh <- nil
-			}
-		case <-c.options.writeTimeoutCh:
-			if c.options.writeTimeoutFunc != nil {
-				go c.options.writeTimeoutFunc(c)
-			}
-		case <-c.done:
-			return
-		}
-	}
-
-	c.handleConnectionError(err)
-}
-
-func (c *connection) handleError(err error) {
-	if c.options.errorHandler == nil {
-		return
-	}
-
-	// When the connection is closed, it is expected that either the read or write loop will return an error.
-	// In that case, we don't need to call the error handler.
-	c.closingMutex.Lock()
-	if c.closing {
-		c.closingMutex.Unlock()
-		return
-	}
-	c.closingMutex.Unlock()
-
-	go c.options.errorHandler(err)
-}
-
-// handlerConnectionError is called when we get an error when reading or writing to the underlying connection.
-func (c *connection) handleConnectionError(err error) {
-	c.closingMutex.Lock()
-	if err == nil || c.closing {
-		c.closingMutex.Unlock()
-		return
-	}
-
-	c.closing = true
-	c.closingMutex.Unlock()
-
-	done := make(chan struct{})
-
-	c.pendingResponsesMutex.Lock()
-	for _, resp := range c.pendingResponses {
-		resp.errCh <- ErrConnectionClosed
-	}
-	c.pendingResponsesMutex.Unlock()
-
-	// Return the error to the callers of Request and Send.
-	go func() {
-		for {
-			select {
-			case req := <-c.outgoingChannel:
-				req.errCh <- ErrConnectionClosed
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	go func() {
-		c.messagesWg.Wait()
-		done <- struct{}{}
-	}()
-
-	c.close()
-}
-
-// readLoop reads data from the socket and runs a goroutine to handle the message.
-// It reads data from the socket until the connection is closed.
-// We should not return from Close until all the messages are handled.
-func (c *connection) readLoop() {
-	var err error
-	var messageBytes []byte
-
-	for {
-		messageBytes, err = c.encodeDecoder.Decode(c.conn)
-		if err != nil {
-			c.handleError(err)
-			break
-		}
-
-		c.incomingChannel <- messageBytes
-	}
-
-	c.handleConnectionError(err)
-}
-
-// handleLoop handles the incoming messages that are read from the socket by the readLoop.
-// The messages may correspond to the responses to the requests sent by the Request method
-// or, they may be messages sent by the remote host to the local host without a previous request.
-func (c *connection) handleLoop() {
-	for {
-		select {
-		case rawBytes := <-c.incomingChannel:
-			go c.handleResponse(rawBytes)
-		case <-c.options.readTimeoutCh:
-			if c.options.readTimeoutFunc != nil {
-				go c.options.readTimeoutFunc(c)
-			}
-		case <-c.done:
-			return
-		}
-	}
-}
-
-func (c *connection) handleResponse(rawBytes []byte) {
-	message, err := c.marshalUnmarshaler.Unmarshal(rawBytes)
-	if err != nil {
-		c.handleError(err)
-		return
-	}
-
-	c.pendingResponsesMutex.Lock()
-	response, found := c.pendingResponses[message.ID]
-	c.pendingResponsesMutex.Unlock()
-
-	if found {
-		response.replyCh <- message
-	} else {
-		c.closingMutex.Lock()
-		if c.closing {
-			c.closingMutex.Unlock()
-			return
-		}
-
-		c.messagesWg.Add(1)
-		c.closingMutex.Unlock()
-
-		c.handler(c, message)
-		c.messagesWg.Done()
-	}
 }
