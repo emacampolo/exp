@@ -13,12 +13,13 @@ import (
 // It is worth mentioning that we don't use the term "client" and "server". Instead, we use the terms "host" and "remote host".
 // It requires a net.Conn which can be created using net.Dial or net.Listen.
 // Its main purpose is to send and receive messages.
-//   - To receive messages that are sent by the remote host, you need to implement the InboundMessageHandler function.
+//   - To receive messages that are sent by the remote host, you need to implement the Handler and NetworkHandler interfaces.
 //   - To send messages to the remote host, you can either use the Request function or the Send function.
 //     The difference between the two is that the Request resembles to the Request-Response pattern in that it expects
 //     a response from the remote host.
 //     The Send function doesn't expect a response from the remote host.
 //     In this regard, it can be related to the Fire-Forget pattern.
+//     Both ensures that the message is written to the socket before returning the control to the caller.
 //
 // It is important to close the underlying connection using the Close method of this interface
 // to ensure that all the resources are released properly and all the requests are completed.
@@ -27,11 +28,11 @@ type Connection interface {
 	// Request sends message and waits for the response as you would expect from the Request-Response pattern.
 	// It returns a ErrRequestTimeout error if the response is not received within the timeout.
 	// If the Connection is closed, it returns ErrConnectionClosed.
-	Request(message Message) (response Message, err error)
+	Request(message OutboundMessage) (response InboundMessage, err error)
 
 	// Send sends message and does not wait for the response as you would expect from the Fire-Forget pattern.
 	// If the Connection is closed, it returns ErrConnectionClosed.
-	Send(message Message) error
+	Send(message OutboundMessage) error
 
 	// Address returns the address of the host that the Connection is connected to.
 	Address() string
@@ -42,10 +43,17 @@ type Connection interface {
 	Close() error
 }
 
-// InboundMessageHandler is a function that is called when a message is received from the remote host.
-// The function is called in a separate goroutine.
-// The function should return a response to be sent back to the remote host.
-type InboundMessageHandler func(connection Connection, message Message)
+// Handler is the interface that uses the Connection to handle incoming messages from the remote host
+// that are not responses to requests nor network messages.
+type Handler interface {
+	Handle(connection Connection, message InboundMessage)
+}
+
+// NetworkHandler is the interface that uses the Connection to handle incoming messages from the remote host
+// that are network messages.
+type NetworkHandler interface {
+	Handle(connection Connection, message InboundMessage)
+}
 
 // WriteTimeoutFunc is a function that is called when the Connection is idle trying to write to the underlying connection.
 // A common use case is to send a heartbeat message to the remote destination.
@@ -62,6 +70,8 @@ var (
 	ErrConnectionClosed = errors.New("connection closed")
 	// ErrRequestTimeout is returned when the request is not completed within the specified timeout.
 	ErrRequestTimeout = errors.New("request timeout")
+	// ErrUnexpectedResponse is returned when the response is not expected.
+	ErrUnexpectedResponse = errors.New("unexpected response")
 )
 
 // EncodeDecoder is responsible for encoding and decoding the byte representation of a Message.
@@ -79,18 +89,33 @@ type EncodeDecoder interface {
 // Any returned error is considered fatal and therefore the connection is closed.
 type MarshalUnmarshaler interface {
 	// Marshal marshals the message into a byte array.
-	Marshal(Message) ([]byte, error)
+	Marshal(OutboundMessage) ([]byte, error)
 	// Unmarshal unmarshalls the message from a byte array.
-	Unmarshal([]byte) (Message, error)
+	Unmarshal([]byte) (InboundMessage, error)
 }
 
-// Message represents a message that is sent over the connection in either direction.
-// The Payload is any data that is marshaled and unmarshalled by the MarshalUnmarshaler.
-type Message struct {
+// OutboundMessage represents a message that is sent to the remote host.
+type OutboundMessage struct {
 	// ID is the identification of the message that is used to match the response to the request.
 	ID string
+
 	// Payload is the message payload.
 	Payload any
+}
+
+// InboundMessage represents a message that is received from the remote host.
+type InboundMessage struct {
+	// ID is the identification of the message that is used to match the response to the request.
+	ID string
+
+	// Payload is the message payload.
+	Payload any
+
+	// IsResponse is true if the message is a response to a request.
+	IsResponse bool
+
+	// IsNetwork is true if the message is network message such as a heartbeat or a ping.
+	IsNetwork bool
 }
 
 // ErrorHandler is called in a goroutine with the errors that can't be returned to the caller.
@@ -98,7 +123,8 @@ type ErrorHandler func(err error)
 
 // New returns a new connection that is created from the given net.Conn.
 // All the arguments are required.
-func New(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, options *Options) (Connection, error) {
+func New(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler,
+	handler Handler, networkHandler NetworkHandler, options *Options) (Connection, error) {
 	if conn == nil {
 		return nil, errors.New("connection is nil")
 	}
@@ -115,11 +141,15 @@ func New(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalU
 		return nil, errors.New("handler is nil")
 	}
 
+	if networkHandler == nil {
+		return nil, errors.New("network handler is nil")
+	}
+
 	if options == nil {
 		return nil, errors.New("options is nil")
 	}
 
-	c := newConnection(conn, encodeDecoder, marshalUnmarshaler, handler, options)
+	c := newConnection(conn, encodeDecoder, marshalUnmarshaler, handler, networkHandler, options)
 	c.run()
 	return c, nil
 }
@@ -128,7 +158,8 @@ type connection struct {
 	conn               net.Conn
 	encodeDecoder      EncodeDecoder
 	marshalUnmarshaler MarshalUnmarshaler
-	handler            InboundMessageHandler
+	handler            Handler
+	networkHandler     NetworkHandler
 	options            *Options
 
 	// outgoingChannel is used to send requests to the remote host.
@@ -148,7 +179,8 @@ type connection struct {
 	stopTickersFunc func()
 }
 
-func newConnection(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler, handler InboundMessageHandler, options *Options) *connection {
+func newConnection(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshaler MarshalUnmarshaler,
+	handler Handler, networkHandler NetworkHandler, options *Options) *connection {
 	// When the connection is closed, stop all the tickers to avoid leakage.
 	stopTickersFunc := func() {
 		if options.writeTimeoutTicker != nil {
@@ -170,6 +202,7 @@ func newConnection(conn net.Conn, encodeDecoder EncodeDecoder, marshalUnmarshale
 		encodeDecoder:      encodeDecoder,
 		marshalUnmarshaler: marshalUnmarshaler,
 		handler:            handler,
+		networkHandler:     networkHandler,
 		options:            options,
 
 		outgoingChannel:  make(chan request),
@@ -276,25 +309,37 @@ func (c *connection) handleResponse(rawBytes []byte) {
 		return
 	}
 
-	c.pendingResponsesMutex.Lock()
-	response, found := c.pendingResponses[message.ID]
-	c.pendingResponsesMutex.Unlock()
-
-	if found {
-		response.replyCh <- message
-	} else {
-		c.closingMutex.Lock()
-		if c.closing {
-			c.closingMutex.Unlock()
-			return
+	// If the message is a response to a request, we should send its channel.
+	// If it is not found in the pendingResponses map, it means that the request timed out.
+	// In that case, we should just ignore the response but call the handlerError function with a sentinel error.
+	if message.IsResponse {
+		c.pendingResponsesMutex.Lock()
+		response, found := c.pendingResponses[message.ID]
+		c.pendingResponsesMutex.Unlock()
+		if found {
+			response.replyCh <- message
+		} else {
+			c.handleError(ErrUnexpectedResponse)
 		}
-
-		c.messagesWg.Add(1)
-		c.closingMutex.Unlock()
-
-		c.handler(c, message)
-		c.messagesWg.Done()
+		return
 	}
+
+	if message.IsNetwork {
+		c.networkHandler.Handle(c, message)
+		return
+	}
+
+	// If it is a message sent by the remote host to the local host without a previous request,
+	// we need to increment the wait group to avoid returning from Close before the message is handled.
+	c.closingMutex.Lock()
+	if c.closing {
+		c.closingMutex.Unlock()
+		return
+	}
+	c.messagesWg.Add(1)
+	c.closingMutex.Unlock()
+	c.handler.Handle(c, message)
+	c.messagesWg.Done()
 }
 
 func (c *connection) handleError(err error) {
@@ -390,22 +435,22 @@ func (c *connection) Done() <-chan struct{} {
 type request struct {
 	message   []byte
 	requestID string
-	replyCh   chan Message
+	replyCh   chan InboundMessage
 	errCh     chan error
 }
 
 // response represents a response from the remote host.
 type response struct {
-	replyCh chan Message
+	replyCh chan InboundMessage
 	errCh   chan error
 }
 
 // Request implements the Connection interface.
-func (c *connection) Request(message Message) (Message, error) {
+func (c *connection) Request(message OutboundMessage) (InboundMessage, error) {
 	c.closingMutex.Lock()
 	if c.closing {
 		c.closingMutex.Unlock()
-		return Message{}, ErrConnectionClosed
+		return InboundMessage{}, ErrConnectionClosed
 	}
 
 	c.messagesWg.Add(1)
@@ -414,47 +459,35 @@ func (c *connection) Request(message Message) (Message, error) {
 	defer c.messagesWg.Done()
 
 	if message.ID == "" {
-		return Message{}, errors.New("message ID is empty")
+		return InboundMessage{}, errors.New("message ID is empty")
 	}
 
 	messageBytes, err := c.marshalUnmarshaler.Marshal(message)
 	if err != nil {
-		return Message{}, fmt.Errorf("marshaling message: %w", err)
+		return InboundMessage{}, fmt.Errorf("marshaling message: %w", err)
 	}
 
 	var buff bytes.Buffer
 	if err := c.encodeDecoder.Encode(&buff, messageBytes); err != nil {
-		return Message{}, err
+		return InboundMessage{}, err
 	}
 
 	req := request{
 		message:   buff.Bytes(),
 		requestID: message.ID,
-		replyCh:   make(chan Message),
+		replyCh:   make(chan InboundMessage),
 		errCh:     make(chan error),
 	}
 
 	c.outgoingChannel <- req
 
-	var resp Message
+	var resp InboundMessage
 
 	select {
 	case resp = <-req.replyCh:
 	case err = <-req.errCh:
 	case <-c.options.requestTimeoutCh:
 		err = ErrRequestTimeout
-		// If the request times out it means that the caller will no longer wait for the response
-		// on the replyCh.
-		// If the response is received before removing the pending response from the map,
-		// the response will be lost.
-		// To avoid that, we forward the response to the InboundMessageHandler.
-		go func() {
-			select {
-			case resp = <-req.replyCh:
-				go c.handler(c, resp)
-			case <-c.done:
-			}
-		}()
 	}
 
 	c.pendingResponsesMutex.Lock()
@@ -465,7 +498,7 @@ func (c *connection) Request(message Message) (Message, error) {
 }
 
 // Send implements the Connection interface.
-func (c *connection) Send(message Message) error {
+func (c *connection) Send(message OutboundMessage) error {
 	c.closingMutex.Lock()
 	if c.closing {
 		c.closingMutex.Unlock()
